@@ -21,5 +21,5 @@ To run it, try `python solarweb.py`.
 There is an optional argument to download solar history to csv files (per year). To use
 this script. First add a field 'install_date' to the solarweb.json file with format 
 'YYYY-MM-DD'. The script will attempt to download daily data from the date until now.
-To run it type `python getallcsv.py`. It will outpout files to logcsv-{year}.csv
+To run it type `python solarweb.py --history`. It will outpout files to history-{year}.csv
 files.

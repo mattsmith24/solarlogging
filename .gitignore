@@ -2,3 +2,4 @@
 /__pycache__
 /pvdata*.log
 /dailydata*.csv
+/history*csv
