@@ -18,8 +18,10 @@ Configuration is via a solarweb.json file with the following format:
 
 To run it, try `python solarweb.py`.
 
-There is an optional argument to download solar history to csv files (per year). To use
-this script. First add a field 'install_date' to the solarweb.json file with format 
+There is an optional argument to download solar history to the daily table in the DB.
+To use this, first add a field 'install_date' to the solarweb.json file with format 
 'YYYY-MM-DD'. The script will attempt to download daily data from the date until now.
-To run it type `python solarweb.py --history`. It will outpout files to history-{year}.csv
-files.
+To run it type `python solarweb.py --history`.
+
+For debugging, run with `python solarweb.py --dump`. This will print the contents of
+the database to the console.

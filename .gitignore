@@ -1,5 +1,3 @@
 /solarweb.json
 /__pycache__
-/pvdata*.log
-/dailydata*.csv
-/history*csv
+/solarweb.db

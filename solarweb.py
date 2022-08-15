@@ -3,6 +3,8 @@ import datetime
 import json
 import argparse
 from collections import defaultdict
+import sqlite3
+
 import requests
 from urllib.parse import urlparse
 from urllib.parse import parse_qs
@@ -18,18 +20,20 @@ class SolarWeb:
         self.last_dailydata_timestamp = None
         self.requests_session = None
         self.pv_system_id = None
+        self.sqlcon = None
 
 
     def init_dailydata(self):
-        yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-        try:
-            with open(f"dailydata-{yesterday.year}.csv", "r") as fd:
-                dailydata = fd.readlines()
-                self.last_dailydata_timestamp = datetime.datetime.fromisoformat(dailydata[-1].split(",")[0])
-        except FileNotFoundError:
-            pass
-        except IndexError:
-            pass
+        self.sqlcon = sqlite3.connect('solarweb.db')
+        self.sqlcon.row_factory = sqlite3.Row
+
+        with self.sqlcon:
+            cur = self.sqlcon.execute("create table if not exists samples (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
+            cur.execute("create table if not exists daily (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
+
+        cur = self.sqlcon.cursor()
+        for row in cur.execute("SELECT * from daily order by id desc limit 1"):
+            self.last_dailydata_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
 
 
     def login(self):
@@ -96,7 +100,7 @@ class SolarWeb:
         return chart_data.json()
 
 
-    def process_chart_data(self, yesterday, filenameprefix="dailydata"):
+    def process_chart_data(self, yesterday):
         # Chart data is a json structure that wraps an array of timestamp / kwh values.
         # The timestamps can be parsed with datetime.datetime.fromtimestamp(val / 1000, tz=datetime.timezone.utc)
         chart_month_production = self.get_chart(yesterday, "month", "production")
@@ -137,16 +141,15 @@ class SolarWeb:
                     # and just return 0 in the next loop
                     daily_data_dict[ts] = defaultdict(int)
                 daily_data_dict[ts][label] = tuple[1]
-        with open(f"{filenameprefix}-{yesterday.year}.csv", "a") as fd:
-            for ts,data_dict in daily_data_dict.items():
-                ts_datetime = datetime.datetime.fromtimestamp(int(ts)/1000, tz=datetime.timezone.utc)
-                if is_new_ts(ts_datetime, self.last_dailydata_timestamp):
-                    # solar generation = feedin + direct consumption
-                    # house user = direct consumption + grid
-                    entry = [ts_datetime.isoformat(), data_dict["grid"], data_dict["direct"] + data_dict["feedin"], data_dict["direct"] + data_dict["grid"]]
-                    entry_str = ",".join([str(e) for e in entry])
-                    fd.write(entry_str + "\n")
-            self.last_dailydata_timestamp = ts_datetime
+        for ts,data_dict in daily_data_dict.items():
+            ts_datetime = datetime.datetime.fromtimestamp(int(ts)/1000, tz=datetime.timezone.utc)
+            if is_new_ts(ts_datetime, self.last_dailydata_timestamp):
+                # solar generation = feedin + direct consumption
+                # house user = direct consumption + grid
+                entry = (ts_datetime.isoformat(), data_dict["grid"], data_dict["direct"] + data_dict["feedin"], data_dict["direct"] + data_dict["grid"])
+                with self.sqlcon:
+                    self.sqlcon.execute("INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", entry)
+        self.last_dailydata_timestamp = ts_datetime
         return True
 
 
@@ -161,8 +164,6 @@ class SolarWeb:
         self.init_dailydata()
 
         last_login_attempt = None
-        today = datetime.datetime.now(datetime.timezone.utc)
-        pvdatalog = open(f"pvdata-{today.year}-{today.month:02}-{today.day:02}.log", "a")
         while not done:
             # Delay logging in if we just made an attempt
             if last_login_attempt != None and (datetime.datetime.now() - last_login_attempt).seconds < 30:
@@ -183,8 +184,23 @@ class SolarWeb:
                     break
                 pvdata_record = actual_data.json()
                 pvdata_record["datetime"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                logline = json.dumps(pvdata_record)
-                print(logline, file=pvdatalog, flush=True)
+                if "IsOnline" in pvdata_record and pvdata_record["IsOnline"] and "P_Grid" in pvdata_record \
+                        and "P_PV" in pvdata_record and "P_Load" in pvdata_record:
+                    grid = 0
+                    if pvdata_record['P_Grid'] != None:
+                        grid = pvdata_record['P_Grid']
+                    pv = 0
+                    if pvdata_record['P_PV'] != None:
+                        pv = pvdata_record['P_PV']
+                    home = 0
+                    if pvdata_record['P_Load'] != None:
+                        home = -pvdata_record['P_Load']
+
+                    with self.sqlcon:
+                        self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
+                            (pvdata_record["datetime"], grid, pv, home))
+                else:
+                    print(f"offline: {json.dumps(pvdata_record)}")
 
                 # Get cumulative solar production data for yesterday, this is so that we get
                 # full days totals across the month boundary
@@ -194,7 +210,7 @@ class SolarWeb:
 
                 time.sleep(30)
 
-        pvdatalog.close()
+        self.sqlcon.close()
         if self.requests_session != None:
             self.requests_session.close()
 
@@ -202,13 +218,20 @@ class SolarWeb:
 def history():
     solar_web = SolarWeb()
     solar_web.load_config()
+    solar_web.init_dailydata()
+
+    # Delete daily data so we can re-populate it
+    with solar_web.sqlcon:
+        solar_web.sqlcon.execute("DELETE FROM daily")
+    solar_web.last_dailydata_timestamp = None
+
     if not solar_web.login():
         return
     process_date = datetime.datetime.strptime(solar_web.config["install_date"],"%Y-%m-%d")
     process_date.replace(tzinfo=datetime.timezone.utc)
     while True:
         print(process_date.isoformat())
-        if not solar_web.process_chart_data(process_date, "history"):
+        if not solar_web.process_chart_data(process_date):
             break
         new_year = process_date.year
         new_month = process_date.month + 1
@@ -219,18 +242,31 @@ def history():
         if process_date > datetime.datetime.now():
             break
     yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-    solar_web.process_chart_data(yesterday, "history")
+    solar_web.process_chart_data(yesterday)
 
 
 def main():
     parser = argparse.ArgumentParser(description='Solar data logger')
     parser.add_argument('--history', action='store_true',
-                        help='Process daily history since install date then exit')
+                        help='Process daily history since install date then exit. This will erase existing daily data (make a backup)')
+    parser.add_argument('--dump', action='store_true',
+                        help='Dump database to stdout and exit')
 
     args = parser.parse_args()
     if args.history:
         history()
         exit()
+
+    if args.dump:
+        con = sqlite3.connect('solarweb.db')
+        print("Daily")
+        for row in con.execute("SELECT * FROM daily"):
+            print(row)
+        print("Samples")
+        for row in con.execute("SELECT * FROM samples"):
+            print(row)
+        exit()
+
 
     solar_web = SolarWeb()
     solar_web.run()
