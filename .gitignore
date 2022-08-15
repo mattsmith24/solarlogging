@@ -1,0 +1,4 @@
+/solarweb.json
+/__pycache__
+/pvdata*.log
+/dailydata*.csv
