@@ -174,9 +174,18 @@ class SolarWeb:
             if not self.login():
                 continue
 
+            sampling_ok = False
+
             while True:
                 # Get realtime solar data
-                actual_data = self.requests_session.get(f"https://www.solarweb.com/ActualData/GetCompareDataForPvSystem?pvSystemId={self.pv_system_id}")
+                try:
+                    actual_data_url = f"https://www.solarweb.com/ActualData/GetCompareDataForPvSystem?pvSystemId={self.pv_system_id}"
+                    actual_data = self.requests_session.get(actual_data_url)
+                except requests.exceptions.ConnectionError as e:
+                    print(f"Exception while accessing: {actual_data_url}")
+                    print(e.strerror)
+                    print(e.winerror)
+                    break
                 if actual_data.status_code != 200:
                     print(actual_data)
                     print(actual_data.url)
@@ -186,6 +195,9 @@ class SolarWeb:
                 pvdata_record["datetime"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 if "IsOnline" in pvdata_record and pvdata_record["IsOnline"] and "P_Grid" in pvdata_record \
                         and "P_PV" in pvdata_record and "P_Load" in pvdata_record:
+                    if not sampling_ok:
+                        sampling_ok = True
+                        print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} Online")
                     grid = 0
                     if pvdata_record['P_Grid'] != None:
                         grid = pvdata_record['P_Grid']
@@ -200,7 +212,8 @@ class SolarWeb:
                         self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
                             (pvdata_record["datetime"], grid, pv, home))
                 else:
-                    print(f"offline: {json.dumps(pvdata_record)}")
+                    print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} Offline: {json.dumps(pvdata_record)}")
+                    sampling_ok = False
 
                 # Get cumulative solar production data for yesterday, this is so that we get
                 # full days totals across the month boundary
