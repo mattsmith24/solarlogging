@@ -42,7 +42,11 @@ class SolarWeb:
             self.requests_session.close()
         self.requests_session = requests.Session()
         # Get a session
-        external_login = self.requests_session.get("https://www.solarweb.com/Account/ExternalLogin")
+        try:
+            external_login = self.requests_session.get("https://www.solarweb.com/Account/ExternalLogin")
+        except requests.exceptions.ConnectionError as e:
+            print(f"Connection error accessing ExternalLogin: {e}")
+            return False
         parsed_url = urlparse(external_login.url)
         query_dict = parse_qs(parsed_url.query)
         if external_login.status_code != 200 or not ("sessionDataKey" in query_dict):
@@ -191,7 +195,17 @@ class SolarWeb:
                     print(actual_data.url)
                     print(actual_data.text)
                     break
-                pvdata_record = actual_data.json()
+                try:
+                    pvdata_record = actual_data.json()
+                except requests.exceptions.JSONDecodeError as e:
+                    print(f"Exception while decoding pvdata")
+                    print(e.strerror)
+                    print(e.winerror)
+                    print(actual_data)
+                    print(actual_data.url)
+                    print(actual_data.text)
+                    break
+                    
                 pvdata_record["datetime"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 if "IsOnline" in pvdata_record and pvdata_record["IsOnline"] and "P_Grid" in pvdata_record \
                         and "P_PV" in pvdata_record and "P_Load" in pvdata_record:
