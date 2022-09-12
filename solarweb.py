@@ -222,9 +222,12 @@ class SolarWeb:
                     if pvdata_record['P_Load'] != None:
                         home = -pvdata_record['P_Load']
 
-                    with self.sqlcon:
-                        self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
-                            (pvdata_record["datetime"], grid, pv, home))
+                    try:
+                        with self.sqlcon:
+                            self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
+                                (pvdata_record["datetime"], grid, pv, home))
+                    except sqlite3.OperationalError as e:
+                        print(f"Error saving data to sqlite DB: {e}")
                 else:
                     print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} Offline: {json.dumps(pvdata_record)}")
                     sampling_ok = False
