@@ -95,13 +95,18 @@ class SolarWeb:
 
 
     def get_chart(self, chartday, interval, view):
-        chart_data = self.requests_session.get(f"https://www.solarweb.com/Chart/GetChartNew?pvSystemId={self.pv_system_id}&year={chartday.year}&month={chartday.month}&day={chartday.day}&interval={interval}&view={view}")
-        if chart_data.status_code != 200:
-            print(chart_data)
-            print(chart_data.url)
-            print(chart_data.text)
+        try:
+            chart_data = self.requests_session.get(f"https://www.solarweb.com/Chart/GetChartNew?pvSystemId={self.pv_system_id}&year={chartday.year}&month={chartday.month}&day={chartday.day}&interval={interval}&view={view}")
+            if chart_data.status_code != 200:
+                print(chart_data)
+                print(chart_data.url)
+                print(chart_data.text)
+                return None
+            return chart_data.json()
+        except requests.exceptions.ConnectionError as e:
+            print(f"Exception reading chart for {chartday.year}-{chartday.month}-{chartday.day} {interval} {view}")
+            print(f"{e}")
             return None
-        return chart_data.json()
 
 
     def process_chart_data(self, yesterday):
