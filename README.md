@@ -23,5 +23,5 @@ To use this, first add a field 'install_date' to the solarweb.json file with for
 'YYYY-MM-DD'. The script will attempt to download daily data from the date until now.
 To run it type `python solarweb.py --history`.
 
-For debugging, run with `python solarweb.py --dump`. This will print the contents of
-the database to the console.
+For debugging, run with `python solarweb.py --debug`. This will print messages about
+the data that is being inserted to the database.

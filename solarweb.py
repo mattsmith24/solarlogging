@@ -15,7 +15,8 @@ def is_new_ts(ts_datetime, last_dailydata_timestamp):
     return (last_dailydata_timestamp == None or ts_datetime > last_dailydata_timestamp) and (ts_datetime.day == yesterday.day or ts_datetime < yesterday)
 
 class SolarWeb:
-    def __init__(self) -> None:
+    def __init__(self, debug=False) -> None:
+        self.debug_enabled = debug
         self.config = None
         self.last_dailydata_timestamp = None
         self.requests_session = None
@@ -23,13 +24,23 @@ class SolarWeb:
         self.sqlcon = None
 
 
+    def debug(self, msg):
+        if self.debug_enabled:
+            print(msg)
+
+
     def init_dailydata(self):
         self.sqlcon = sqlite3.connect('solarweb.db')
         self.sqlcon.row_factory = sqlite3.Row
 
+        self.debug("init_dailydata: Initialising tables")
         with self.sqlcon:
             cur = self.sqlcon.execute("create table if not exists samples (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
             cur.execute("create table if not exists daily (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
+            cur.execute("create table if not exists fiveminute (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
+            cur.execute("create table if not exists hourly (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
+            cur.execute("create table if not exists weekly (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
+            cur.execute("create table if not exists monthly (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
 
         cur = self.sqlcon.cursor()
         for row in cur.execute("SELECT * from daily order by id desc limit 1"):
@@ -157,10 +168,63 @@ class SolarWeb:
                 # house user = direct consumption + grid
                 entry = (ts_datetime.isoformat(), data_dict["grid"], data_dict["direct"] + data_dict["feedin"], data_dict["direct"] + data_dict["grid"])
                 with self.sqlcon:
+                    self.debug(f"process_chart_data: INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?), {entry}")
                     self.sqlcon.execute("INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", entry)
         self.last_dailydata_timestamp = ts_datetime
         return True
 
+
+    def consolidate_data(self):
+        def timestamp_slot_in_hour(ts, slot_minutes):
+            """ Divide the hour into slots and return the start time of the slot
+                that the current timestamp falls in. """
+            res = ts.replace(minute=0, second=0, microsecond=0)
+            slot_num = (ts - res) // datetime.timedelta(minutes=slot_minutes)
+            res += datetime.timedelta(minutes=slot_minutes) * slot_num
+            return res
+
+        cur = self.sqlcon.cursor()
+        last_timestamp = None
+        for row in cur.execute("SELECT * from fiveminute order by id desc limit 1"):
+            last_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
+        if last_timestamp == None:
+            # get first sample timestamp
+            for row in cur.execute("SELECT * from samples order by id asc limit 1"):
+                last_timestamp = timestamp_slot_in_hour(datetime.datetime.fromisoformat(row["timestamp"]), 5)
+        last_sample_timestamp = None
+        for row in cur.execute("SELECT * from samples order by id desc limit 1"):
+            last_sample_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
+        if last_sample_timestamp != None:
+            # Assume last_timestamp lines up with a slot start. The five minute slots are recorded
+            # with the timestamp at the start of the slot.
+            cur_timestamp = last_timestamp + datetime.timedelta(minutes=5)
+            # Loop through as many slots as we can before time limit
+            while cur_timestamp < timestamp_slot_in_hour(last_sample_timestamp, 5) \
+                    and datetime.datetime.now(datetime.timezone.utc) < self.next_sample_time - datetime.timedelta(seconds=5):
+                cur_end_timestamp = cur_timestamp + datetime.timedelta(minutes=5)
+                grid = 0
+                solar = 0
+                home = 0
+                num_samples = 0
+                for row in cur.execute("SELECT * from samples WHERE timestamp >= ? and timestamp <= ? order by id asc",
+                        (cur_timestamp.isoformat(), cur_end_timestamp.isoformat())):
+                    # Only accumulate +ve grid usage. Feedin can be calculated from 'home - solar'
+                    if row['grid'] > 0:
+                        grid += row['grid']
+                    solar += row['solar']
+                    home += row['home']
+                    num_samples += 1
+                if grid > 0.0 or solar > 0.0 or home > 0.0:
+                    # Convert to kwh
+                    grid = grid / num_samples / 1000.0 * 5.0 / 60.0
+                    solar = solar / num_samples / 1000.0 * 5.0 / 60.0
+                    home = home / num_samples / 1000.0 * 5.0 / 60.0
+                    with self.sqlcon:
+                        self.debug(f"consolidate_data: INSERT INTO fiveminute (timestamp, grid, solar, home) VALUES ({cur_timestamp.isoformat()}, {grid}, {solar}, {home})")
+                        self.sqlcon.execute("INSERT INTO fiveminute (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)",
+                            (cur_timestamp.isoformat(), grid, solar, home))
+                cur_timestamp += datetime.timedelta(minutes=5)
+        
 
     def load_config(self):
         with open("solarweb.json") as fd:
@@ -210,8 +274,10 @@ class SolarWeb:
                     print(actual_data.url)
                     print(actual_data.text)
                     break
-                    
-                pvdata_record["datetime"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                
+                sample_time = datetime.datetime.now(datetime.timezone.utc)
+                self.next_sample_time = sample_time + datetime.timedelta(seconds=30)
+                pvdata_record["datetime"] = sample_time.isoformat()
                 if "IsOnline" in pvdata_record and pvdata_record["IsOnline"] and "P_Grid" in pvdata_record \
                         and "P_PV" in pvdata_record and "P_Load" in pvdata_record:
                     if not sampling_ok:
@@ -229,6 +295,7 @@ class SolarWeb:
 
                     try:
                         with self.sqlcon:
+                            self.debug(f"run: INSERT INTO samples (timestamp, grid, solar, home) VALUES ({pvdata_record['datetime']}, {grid}, {pv}, {home})")
                             self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
                                 (pvdata_record["datetime"], grid, pv, home))
                     except sqlite3.OperationalError as e:
@@ -243,7 +310,11 @@ class SolarWeb:
                 if not self.process_chart_data(yesterday):
                     break
 
-                time.sleep(30)
+                self.consolidate_data()
+                
+                now = datetime.datetime.now(datetime.timezone.utc)
+                if self.next_sample_time > now:
+                    time.sleep((self.next_sample_time - now).total_seconds())
 
         self.sqlcon.close()
         if self.requests_session != None:
@@ -284,26 +355,15 @@ def main():
     parser = argparse.ArgumentParser(description='Solar data logger')
     parser.add_argument('--history', action='store_true',
                         help='Process daily history since install date then exit. This will erase existing daily data (make a backup)')
-    parser.add_argument('--dump', action='store_true',
-                        help='Dump database to stdout and exit')
+    parser.add_argument('--debug', action='store_true',
+                        help='Print debug messages')
 
     args = parser.parse_args()
     if args.history:
         history()
         exit()
 
-    if args.dump:
-        con = sqlite3.connect('solarweb.db')
-        print("Daily")
-        for row in con.execute("SELECT * FROM daily"):
-            print(row)
-        print("Samples")
-        for row in con.execute("SELECT * FROM samples"):
-            print(row)
-        exit()
-
-
-    solar_web = SolarWeb()
+    solar_web = SolarWeb(debug=args.debug)
     solar_web.run()
 
  
