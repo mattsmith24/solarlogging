@@ -174,39 +174,31 @@ class SolarWeb:
         return True
 
 
-    def consolidate_data(self):
-        def timestamp_slot_in_hour(ts, slot_minutes):
-            """ Divide the hour into slots and return the start time of the slot
-                that the current timestamp falls in. """
-            res = ts.replace(minute=0, second=0, microsecond=0)
-            slot_num = (ts - res) // datetime.timedelta(minutes=slot_minutes)
-            res += datetime.timedelta(minutes=slot_minutes) * slot_num
-            return res
-
+    def process_aggregation(self, table, time_slot_fn, time_slot_increment_fn, convert_kwh_fn, deadline):
         cur = self.sqlcon.cursor()
         last_timestamp = None
-        for row in cur.execute("SELECT * from fiveminute order by id desc limit 1"):
+        for row in cur.execute(f"SELECT * from {table} order by id desc limit 1"):
             last_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
         if last_timestamp == None:
             # get first sample timestamp
             for row in cur.execute("SELECT * from samples order by id asc limit 1"):
-                last_timestamp = timestamp_slot_in_hour(datetime.datetime.fromisoformat(row["timestamp"]), 5)
+                last_timestamp = time_slot_fn(datetime.datetime.fromisoformat(row["timestamp"]))
         last_sample_timestamp = None
         for row in cur.execute("SELECT * from samples order by id desc limit 1"):
             last_sample_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
         if last_sample_timestamp != None:
             # Assume last_timestamp lines up with a slot start. The five minute slots are recorded
             # with the timestamp at the start of the slot.
-            cur_timestamp = last_timestamp + datetime.timedelta(minutes=5)
+            cur_timestamp = time_slot_increment_fn(last_timestamp)
             # Loop through as many slots as we can before time limit
-            while cur_timestamp < timestamp_slot_in_hour(last_sample_timestamp, 5) \
-                    and datetime.datetime.now(datetime.timezone.utc) < self.next_sample_time - datetime.timedelta(seconds=5):
-                cur_end_timestamp = cur_timestamp + datetime.timedelta(minutes=5)
+            while cur_timestamp < time_slot_fn(last_sample_timestamp) \
+                    and datetime.datetime.now(datetime.timezone.utc) < deadline - datetime.timedelta(seconds=5):
+                cur_end_timestamp = time_slot_increment_fn(cur_timestamp)
                 grid = 0
                 solar = 0
                 home = 0
                 num_samples = 0
-                for row in cur.execute("SELECT * from samples WHERE timestamp >= ? and timestamp <= ? order by id asc",
+                for row in cur.execute("SELECT * from samples WHERE timestamp >= ? and timestamp < ? order by id asc",
                         (cur_timestamp.isoformat(), cur_end_timestamp.isoformat())):
                     # Only accumulate +ve grid usage. Feedin can be calculated from 'home - solar'
                     if row['grid'] > 0:
@@ -216,15 +208,44 @@ class SolarWeb:
                     num_samples += 1
                 if grid > 0.0 or solar > 0.0 or home > 0.0:
                     # Convert to kwh
-                    grid = grid / num_samples / 1000.0 * 5.0 / 60.0
-                    solar = solar / num_samples / 1000.0 * 5.0 / 60.0
-                    home = home / num_samples / 1000.0 * 5.0 / 60.0
+                    grid = convert_kwh_fn(grid / num_samples)
+                    solar = convert_kwh_fn(solar / num_samples)
+                    home = convert_kwh_fn(home / num_samples)
                     with self.sqlcon:
-                        self.debug(f"consolidate_data: INSERT INTO fiveminute (timestamp, grid, solar, home) VALUES ({cur_timestamp.isoformat()}, {grid}, {solar}, {home})")
-                        self.sqlcon.execute("INSERT INTO fiveminute (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)",
+                        self.debug(f"consolidate_data: INSERT INTO {table} (timestamp, grid, solar, home) VALUES ({cur_timestamp.isoformat()}, {grid}, {solar}, {home})")
+                        self.sqlcon.execute(f"INSERT INTO {table} (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)",
                             (cur_timestamp.isoformat(), grid, solar, home))
-                cur_timestamp += datetime.timedelta(minutes=5)
+                cur_timestamp = cur_end_timestamp
+
+
+    def aggregate_data(self, deadline):
+        def timestamp_5min_slot_in_hour(ts):
+            """ Divide the hour into slots and return the start time of the slot
+                that the current timestamp falls in. """
+            res = ts.replace(minute=0, second=0, microsecond=0)
+            slot_num = (ts - res) // datetime.timedelta(minutes=5)
+            res += datetime.timedelta(minutes=5) * slot_num
+            return res
         
+        def add_five_minutes(ts):
+            return ts + datetime.timedelta(minutes=5)
+
+        def convert_fiveminute_to_kwh(val):
+            return val / 1000.0 * 5.0 / 60.0
+
+        self.process_aggregation("fiveminute", timestamp_5min_slot_in_hour, add_five_minutes, convert_fiveminute_to_kwh, deadline)
+
+        def timestamp_hour(ts):
+            return ts.replace(minute=0, second=0, microsecond=0)
+
+        def add_hour(ts):
+            return ts + datetime.timedelta(hours=1)
+        
+        def convert_hourly_to_kwh(val):
+            return val / 1000.0
+
+        self.process_aggregation("hourly", timestamp_hour, add_hour, convert_hourly_to_kwh, deadline)
+
 
     def load_config(self):
         with open("solarweb.json") as fd:
@@ -310,7 +331,7 @@ class SolarWeb:
                 if not self.process_chart_data(yesterday):
                     break
 
-                self.consolidate_data()
+                self.aggregate_data(self.next_sample_time)
                 
                 now = datetime.datetime.now(datetime.timezone.utc)
                 if self.next_sample_time > now:
