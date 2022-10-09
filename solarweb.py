@@ -4,11 +4,17 @@ import json
 import argparse
 from collections import defaultdict
 import sqlite3
+import appdirs
+import os
 
 import requests
 from urllib.parse import urlparse
 from urllib.parse import parse_qs
 from bs4 import BeautifulSoup
+
+SOLARLOGGING_DATA_DIR = appdirs.user_data_dir("solarlogging", "mattsmith24")
+SOLARLOGGING_DB_PATH = os.path.join(SOLARLOGGING_DATA_DIR, "solarlogging.db")
+print(f"SOLARLOGGING_DB_PATH={SOLARLOGGING_DB_PATH}")
 
 def is_new_ts(ts_datetime, last_dailydata_timestamp):
     yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
@@ -30,7 +36,8 @@ class SolarWeb:
 
 
     def init_dailydata(self):
-        self.sqlcon = sqlite3.connect('solarweb.db')
+        os.makedirs(SOLARLOGGING_DATA_DIR, exist_ok=True)
+        self.sqlcon = sqlite3.connect(SOLARLOGGING_DB_PATH)
         self.sqlcon.row_factory = sqlite3.Row
 
         self.debug("init_dailydata: Initialising tables")

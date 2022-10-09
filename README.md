@@ -6,6 +6,7 @@ Required python modules:
 
 - requests
 - beautifulsoup4
+- appdirs
 
 Configuration is via a solarweb.json file with the following format:
 
@@ -17,6 +18,9 @@ Configuration is via a solarweb.json file with the following format:
 ```
 
 To run it, try `python solarweb.py`.
+
+The sqlite3 database will be saved as solarlogging.db in the user data directory.
+This location is printed at app startup.
 
 There is an optional argument to download solar history to the daily table in the DB.
 To use this, first add a field 'install_date' to the solarweb.json file with format 
