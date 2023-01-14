@@ -259,7 +259,7 @@ class SolarWeb:
                     # To avoid this, skip ahead to the next point in the source data that is greater
                     # than the cur_timestamp
                     for row in cur.execute(f"SELECT * from {source_table} where timestamp > ? \
-                            and grid != 0 and solar != 0 and home != 0 order by id asc limit 1",
+                            and (grid != 0 or solar != 0 or home != 0) order by id asc limit 1",
                             (cur_timestamp.isoformat(),)):
                         cur_end_timestamp = time_slot_fn(datetime.datetime.fromisoformat(row["timestamp"]))
                         print(f"process_aggregation {table}: Skip to cur_timestamp={cur_end_timestamp}")
