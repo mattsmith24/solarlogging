@@ -18,7 +18,16 @@ print(f"SOLARLOGGING_DB_PATH={SOLARLOGGING_DB_PATH}")
 
 def is_new_ts(ts_datetime, last_dailydata_timestamp):
     yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-    return (last_dailydata_timestamp == None or ts_datetime > last_dailydata_timestamp) and (ts_datetime.day == yesterday.day or ts_datetime < yesterday)
+    return (
+        (
+            last_dailydata_timestamp == None
+            or ts_datetime > last_dailydata_timestamp
+        )
+        and (
+            ts_datetime.day == yesterday.day
+            or ts_datetime < yesterday
+        )
+    )
 
 class SolarWeb:
     def __init__(self, debug=False) -> None:
@@ -120,7 +129,11 @@ class SolarWeb:
                 print(chart_data.url)
                 print(chart_data.text)
                 return None
-            return chart_data.json()
+            jsonchart = chart_data.json()
+            if not jsonchart:
+                print("get_chart: no json data returned")
+                return None
+            return jsonchart
         except requests.exceptions.ConnectionError as e:
             print(f"Exception reading chart for {chartday.year}-{chartday.month}-{chartday.day} {interval} {view}")
             print(f"{e}")
@@ -134,13 +147,17 @@ class SolarWeb:
         if chart_month_production == None:
             return False
 
+        print(f"process_chart_data: last_dailydata_timestamp = {self.last_dailydata_timestamp}")
         found_new_data = False
         for data_tuple in chart_month_production["settings"]["series"][0]["data"]:
+            print(f"process_chart_data: chart_month_production ts = {data_tuple[0]}")
             ts_datetime = datetime.datetime.fromtimestamp(int(data_tuple[0])/1000, tz=datetime.timezone.utc)
             if is_new_ts(ts_datetime, self.last_dailydata_timestamp):
                 found_new_data = True
+                print("Timestamp is new")
                 break
         if not found_new_data:
+            print("process_chart_data: No new timestamps")
             return True
 
         # Get cumulative solar consumption data for the current month
@@ -168,8 +185,15 @@ class SolarWeb:
                     # and just return 0 in the next loop
                     daily_data_dict[ts] = defaultdict(int)
                 daily_data_dict[ts][label] = tuple[1]
-        for ts,data_dict in daily_data_dict.items():
+        # Ensure records are processed in order of timestamp, not by the whims of the dict key fn
+        timestamps = list(daily_data_dict.keys())
+        timestamps.sort(
+            key = lambda ts: datetime.datetime.fromtimestamp(int(ts)/1000, tz=datetime.timezone.utc))
+        last_insert_ts = None
+        for ts in timestamps:
+            data_dict = daily_data_dict[ts]
             ts_datetime = datetime.datetime.fromtimestamp(int(ts)/1000, tz=datetime.timezone.utc)
+            print(f"process_chart_data: Looking at data for ts {ts}")
             if is_new_ts(ts_datetime, self.last_dailydata_timestamp):
                 # solar generation = feedin + direct consumption
                 # house user = direct consumption + grid
@@ -177,21 +201,26 @@ class SolarWeb:
                 with self.sqlcon:
                     self.debug(f"process_chart_data: INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?), {entry}")
                     self.sqlcon.execute("INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", entry)
-        self.last_dailydata_timestamp = ts_datetime
+                    last_insert_ts = ts_datetime
+            else:
+                print("We already have this ts in the table or it's too new")
+        if last_insert_ts != None:
+            self.last_dailydata_timestamp = last_insert_ts
+            print(f"process_chart_data: New last_dailydata_timestamp = {self.last_dailydata_timestamp}")
         return True
 
 
-    def process_aggregation(self, table, time_slot_fn, time_slot_increment_fn, convert_kwh_fn, deadline):
+    def process_aggregation(self, table, source_table, time_slot_fn, time_slot_increment_fn, convert_kwh_fn, deadline):
         cur = self.sqlcon.cursor()
         last_timestamp = None
         for row in cur.execute(f"SELECT * from {table} order by id desc limit 1"):
             last_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
         if last_timestamp == None:
             # get first sample timestamp
-            for row in cur.execute("SELECT * from samples order by id asc limit 1"):
+            for row in cur.execute(f"SELECT * from {source_table} order by id asc limit 1"):
                 last_timestamp = time_slot_fn(datetime.datetime.fromisoformat(row["timestamp"]))
         last_sample_timestamp = None
-        for row in cur.execute("SELECT * from samples order by id desc limit 1"):
+        for row in cur.execute(f"SELECT * from {source_table} order by id desc limit 1"):
             last_sample_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
         if last_sample_timestamp != None:
             # Assume last_timestamp lines up with a slot start. The five minute slots are recorded
@@ -205,7 +234,7 @@ class SolarWeb:
                 solar = 0
                 home = 0
                 num_samples = 0
-                for row in cur.execute("SELECT * from samples WHERE timestamp >= ? and timestamp < ? order by id asc",
+                for row in cur.execute(f"SELECT * from {source_table} WHERE timestamp >= ? and timestamp < ? order by id asc",
                         (cur_timestamp.isoformat(), cur_end_timestamp.isoformat())):
                     # Only accumulate +ve grid usage. Feedin can be calculated from 'home - solar'
                     if row['grid'] > 0:
@@ -215,13 +244,25 @@ class SolarWeb:
                     num_samples += 1
                 if grid > 0.0 or solar > 0.0 or home > 0.0:
                     # Convert to kwh
-                    grid = convert_kwh_fn(grid / num_samples)
-                    solar = convert_kwh_fn(solar / num_samples)
-                    home = convert_kwh_fn(home / num_samples)
+                    if convert_kwh_fn != None:
+                        grid = convert_kwh_fn(grid / num_samples)
+                        solar = convert_kwh_fn(solar / num_samples)
+                        home = convert_kwh_fn(home / num_samples)
                     with self.sqlcon:
                         self.debug(f"consolidate_data: INSERT INTO {table} (timestamp, grid, solar, home) VALUES ({cur_timestamp.isoformat()}, {grid}, {solar}, {home})")
                         self.sqlcon.execute(f"INSERT INTO {table} (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)",
                             (cur_timestamp.isoformat(), grid, solar, home))
+                else:
+                    # if there are large gaps in the data then sometimes this loop hits the deadline
+                    # before it can find the end of the gap. In that case, this function will be run again
+                    # from the last good timestamp, hit the gap, timeout and never get past that point.
+                    # To avoid this, skip ahead to the next point in the source data that is greater
+                    # than the cur_timestamp
+                    for row in cur.execute(f"SELECT * from {source_table} where timestamp > ? \
+                            and grid != 0 and solar != 0 and home != 0 order by id asc limit 1",
+                            (cur_timestamp.isoformat(),)):
+                        cur_end_timestamp = time_slot_fn(datetime.datetime.fromisoformat(row["timestamp"]))
+                        print(f"process_aggregation {table}: Skip to cur_timestamp={cur_end_timestamp}")
                 cur_timestamp = cur_end_timestamp
 
 
@@ -233,25 +274,34 @@ class SolarWeb:
             slot_num = (ts - res) // datetime.timedelta(minutes=5)
             res += datetime.timedelta(minutes=5) * slot_num
             return res
-        
         def add_five_minutes(ts):
             return ts + datetime.timedelta(minutes=5)
-
         def convert_fiveminute_to_kwh(val):
             return val / 1000.0 * 5.0 / 60.0
-
-        self.process_aggregation("fiveminute", timestamp_5min_slot_in_hour, add_five_minutes, convert_fiveminute_to_kwh, deadline)
+        self.process_aggregation("fiveminute", "samples", timestamp_5min_slot_in_hour, add_five_minutes, convert_fiveminute_to_kwh, deadline)
 
         def timestamp_hour(ts):
             return ts.replace(minute=0, second=0, microsecond=0)
-
         def add_hour(ts):
             return ts + datetime.timedelta(hours=1)
-        
         def convert_hourly_to_kwh(val):
             return val / 1000.0
+        self.process_aggregation("hourly", "samples", timestamp_hour, add_hour, convert_hourly_to_kwh, deadline)
 
-        self.process_aggregation("hourly", timestamp_hour, add_hour, convert_hourly_to_kwh, deadline)
+        def timestamp_weekly(ts):
+            # weekday() - Return the day of the week as an integer, where Monday is 0 and Sunday is 6.
+            # Subtract ts.weekday() from the current date to get the start of the week.
+            return ts.replace(hour=0, minute=0, second=0, microsecond=0) \
+                - datetime.timedelta(days=ts.weekday())
+        def add_week(ts):
+            return ts + datetime.timedelta(days=7)
+        self.process_aggregation("weekly", "daily", timestamp_weekly, add_week, None, deadline)
+
+        def timestamp_monthly(ts):
+            return ts.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        def add_month(ts):
+            return (ts + datetime.timedelta(days=31)).replace(day=1)
+        self.process_aggregation("monthly", "daily", timestamp_monthly, add_month, None, deadline)
 
 
     def load_config(self):
@@ -335,8 +385,10 @@ class SolarWeb:
                 # Get cumulative solar production data for yesterday, this is so that we get
                 # full days totals across the month boundary
                 yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-                if not self.process_chart_data(yesterday):
-                    break
+                yesterday = yesterday.replace(hour = 0, minute = 0, second = 0, microsecond = 0)
+                if yesterday > self.last_dailydata_timestamp:
+                    if not self.process_chart_data(yesterday):
+                        break
 
                 self.aggregate_data(self.next_sample_time)
                 
