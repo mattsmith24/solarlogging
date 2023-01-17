@@ -262,7 +262,7 @@ class SolarWeb:
                             and (grid != 0 or solar != 0 or home != 0) order by id asc limit 1",
                             (cur_timestamp.isoformat(),)):
                         cur_end_timestamp = time_slot_fn(datetime.datetime.fromisoformat(row["timestamp"]))
-                        print(f"process_aggregation {table}: Skip to cur_timestamp={cur_end_timestamp}")
+                        self.debug(f"process_aggregation {table}: Skip to cur_timestamp={cur_end_timestamp}")
                 cur_timestamp = cur_end_timestamp
 
 
