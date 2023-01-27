@@ -115,7 +115,12 @@ class SolarWeb:
             "AuthenticatedIdPs": soup.find("input", attrs={"name": "AuthenticatedIdPs"}).attrs["value"],
             "session_state": soup.find("input", attrs={"name": "session_state"}).attrs["value"],
         }
+        try:
         external_login_callback = self.requests_session.post("https://www.solarweb.com/Account/ExternalLoginCallback", data=commonauth_form_data)
+        except requests.exceptions.ConnectionError as e:
+            print(f"Exception when posting ExternalLoginCallback: {e}")
+            return False
+
         # Get PV system ID
         parsed_url = urlparse(external_login_callback.url)
         query_dict = parse_qs(parsed_url.query)
