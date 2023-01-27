@@ -19,9 +19,9 @@ print(f"SOLARLOGGING_DB_PATH={SOLARLOGGING_DB_PATH}")
 
 def is_daily_ts_newer_than_last_dailydata_timestamp(ts_datetime, last_dailydata_timestamp):
     return (
-            last_dailydata_timestamp == None
-            or ts_datetime > last_dailydata_timestamp
-        )
+        last_dailydata_timestamp == None
+        or ts_datetime > last_dailydata_timestamp
+    )
 
 
 def is_daily_ts_newer_than_yesterday(ts_datetime):
@@ -29,7 +29,7 @@ def is_daily_ts_newer_than_yesterday(ts_datetime):
     return (
         ts_datetime.day != yesterday.day
         and ts_datetime > yesterday
-        )
+    )
 
 
 def is_new_daily_ts(ts_datetime, last_dailydata_timestamp):
@@ -87,9 +87,9 @@ class SolarWeb:
         query_dict = parse_qs(parsed_url.query)
         if external_login.status_code != 200 or not ("sessionDataKey" in query_dict):
             print("Error: Couldn't parse sessionDataKey from URL")
-            print(external_login)
-            print(external_login.url)
-            print(external_login.text)
+            self.debug(external_login)
+            self.debug(external_login.url)
+            self.debug(external_login.text)
             return False
         session_data_key = query_dict['sessionDataKey'][0]
         # Login to fronius
@@ -101,9 +101,9 @@ class SolarWeb:
         })
         if commonauth.status_code != 200:
             print("Error: posting to commonauth")
-            print(commonauth)
-            print(commonauth.url)
-            print(commonauth.text)
+            self.debug(commonauth)
+            self.debug(commonauth.url)
+            self.debug(commonauth.text)
             return False
 
         # Register login with Solarweb
@@ -116,7 +116,7 @@ class SolarWeb:
             "session_state": soup.find("input", attrs={"name": "session_state"}).attrs["value"],
         }
         try:
-        external_login_callback = self.requests_session.post("https://www.solarweb.com/Account/ExternalLoginCallback", data=commonauth_form_data)
+            external_login_callback = self.requests_session.post("https://www.solarweb.com/Account/ExternalLoginCallback", data=commonauth_form_data)
         except requests.exceptions.ConnectionError as e:
             print(f"Exception when posting ExternalLoginCallback: {e}")
             return False
@@ -126,9 +126,9 @@ class SolarWeb:
         query_dict = parse_qs(parsed_url.query)
         if external_login_callback.status_code != 200 or not ('pvSystemId' in query_dict):
             print("Error: Couldn't parse pvSystemId from URL")
-            print(external_login_callback)
-            print(external_login_callback.url)
-            print(external_login_callback.text)
+            self.debug(external_login_callback)
+            self.debug(external_login_callback.url)
+            self.debug(external_login_callback.text)
             return False
         self.pv_system_id = query_dict['pvSystemId'][0]
         print("Logged into solarweb. Begin polling data")
@@ -139,18 +139,18 @@ class SolarWeb:
         try:
             chart_data = self.requests_session.get(f"https://www.solarweb.com/Chart/GetChartNew?pvSystemId={self.pv_system_id}&year={chartday.year}&month={chartday.month}&day={chartday.day}&interval={interval}&view={view}")
             if chart_data.status_code != 200:
-                print(chart_data)
-                print(chart_data.url)
-                print(chart_data.text)
+                self.debug(chart_data)
+                self.debug(chart_data.url)
+                self.debug(chart_data.text)
                 return None
             jsonchart = chart_data.json()
             if not jsonchart:
-                print("get_chart: no json data returned")
+                self.debug("get_chart: no json data returned")
                 return None
             return jsonchart
         except requests.exceptions.ConnectionError as e:
-            print(f"Exception reading chart for {chartday.year}-{chartday.month}-{chartday.day} {interval} {view}")
-            print(f"{e}")
+            self.debug(f"Exception reading chart for {chartday.year}-{chartday.month}-{chartday.day} {interval} {view}")
+            self.debug(f"{e}")
             return None
 
 
@@ -161,17 +161,17 @@ class SolarWeb:
         if chart_month_production == None:
             return False
 
-        print(f"process_chart_data: last_dailydata_timestamp = {self.last_dailydata_timestamp}")
+        self.debug(f"process_chart_data: last_dailydata_timestamp = {self.last_dailydata_timestamp}")
         found_new_data = False
         for data_tuple in chart_month_production["settings"]["series"][0]["data"]:
-            print(f"process_chart_data: chart_month_production ts = {data_tuple[0]}")
+            self.debug(f"process_chart_data: chart_month_production ts = {data_tuple[0]}")
             ts_datetime = datetime.datetime.fromtimestamp(int(data_tuple[0])/1000, tz=datetime.timezone.utc)
             if is_new_daily_ts(ts_datetime, self.last_dailydata_timestamp):
                 found_new_data = True
-                print("Timestamp is new")
+                self.debug("Timestamp is new")
                 break
         if not found_new_data:
-            print("process_chart_data: No new timestamps")
+            self.debug("process_chart_data: No new timestamps")
             return True
 
         # Get cumulative solar consumption data for the current month
@@ -223,7 +223,7 @@ class SolarWeb:
                     self.debug("This ts is too new. We can't process daily data until the day is done")
         if last_insert_ts != None:
             self.last_dailydata_timestamp = last_insert_ts
-            print(f"process_chart_data: New last_dailydata_timestamp = {self.last_dailydata_timestamp}")
+            self.debug(f"process_chart_data: New last_dailydata_timestamp = {self.last_dailydata_timestamp}")
         return True
 
 
@@ -350,24 +350,24 @@ class SolarWeb:
                     actual_data_url = f"https://www.solarweb.com/ActualData/GetCompareDataForPvSystem?pvSystemId={self.pv_system_id}"
                     actual_data = self.requests_session.get(actual_data_url)
                 except requests.exceptions.ConnectionError as e:
-                    print(f"Exception while accessing: {actual_data_url}")
-                    print(e.strerror)
-                    print(e.winerror)
+                    self.debug(f"Exception while accessing: {actual_data_url}")
+                    self.debug(e.strerror)
+                    self.debug(e.winerror)
                     break
                 if actual_data.status_code != 200:
-                    print(actual_data)
-                    print(actual_data.url)
-                    print(actual_data.text)
+                    self.debug(actual_data)
+                    self.debug(actual_data.url)
+                    self.debug(actual_data.text)
                     break
                 try:
                     pvdata_record = actual_data.json()
                 except requests.exceptions.JSONDecodeError as e:
-                    print(f"Exception while decoding pvdata")
-                    print(e.strerror)
-                    print(e.winerror)
-                    print(actual_data)
-                    print(actual_data.url)
-                    print(actual_data.text)
+                    self.debug(f"Exception while decoding pvdata")
+                    self.debug(e.strerror)
+                    self.debug(e.winerror)
+                    self.debug(actual_data)
+                    self.debug(actual_data.url)
+                    self.debug(actual_data.text)
                     break
                 
                 sample_time = datetime.datetime.now(datetime.timezone.utc)
@@ -394,7 +394,7 @@ class SolarWeb:
                             self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
                                 (pvdata_record["datetime"], grid, pv, home))
                     except sqlite3.OperationalError as e:
-                        print(f"Error saving data to sqlite DB: {e}")
+                        self.debug(f"Error saving data to sqlite DB: {e}")
                 else:
                     print(f"{datetime.datetime.now(datetime.timezone.utc).isoformat()} Offline: {json.dumps(pvdata_record)}")
                     sampling_ok = False
