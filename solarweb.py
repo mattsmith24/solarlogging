@@ -16,17 +16,26 @@ SOLARLOGGING_DATA_DIR = appdirs.user_data_dir("solarlogging", "mattsmith24")
 SOLARLOGGING_DB_PATH = os.path.join(SOLARLOGGING_DATA_DIR, "solarlogging.db")
 print(f"SOLARLOGGING_DB_PATH={SOLARLOGGING_DB_PATH}")
 
-def is_new_ts(ts_datetime, last_dailydata_timestamp):
-    yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
+
+def is_daily_ts_newer_than_last_dailydata_timestamp(ts_datetime, last_dailydata_timestamp):
     return (
-        (
             last_dailydata_timestamp == None
             or ts_datetime > last_dailydata_timestamp
         )
-        and (
-            ts_datetime.day == yesterday.day
-            or ts_datetime < yesterday
+
+
+def is_daily_ts_newer_than_yesterday(ts_datetime):
+    yesterday = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
+    return (
+        ts_datetime.day != yesterday.day
+        and ts_datetime > yesterday
         )
+
+
+def is_new_daily_ts(ts_datetime, last_dailydata_timestamp):
+    return (
+        is_daily_ts_newer_than_last_dailydata_timestamp(ts_datetime, last_dailydata_timestamp)
+        and not is_daily_ts_newer_than_yesterday(ts_datetime)
     )
 
 class SolarWeb:
@@ -152,7 +161,7 @@ class SolarWeb:
         for data_tuple in chart_month_production["settings"]["series"][0]["data"]:
             print(f"process_chart_data: chart_month_production ts = {data_tuple[0]}")
             ts_datetime = datetime.datetime.fromtimestamp(int(data_tuple[0])/1000, tz=datetime.timezone.utc)
-            if is_new_ts(ts_datetime, self.last_dailydata_timestamp):
+            if is_new_daily_ts(ts_datetime, self.last_dailydata_timestamp):
                 found_new_data = True
                 print("Timestamp is new")
                 break
@@ -193,8 +202,8 @@ class SolarWeb:
         for ts in timestamps:
             data_dict = daily_data_dict[ts]
             ts_datetime = datetime.datetime.fromtimestamp(int(ts)/1000, tz=datetime.timezone.utc)
-            print(f"process_chart_data: Looking at data for ts {ts}")
-            if is_new_ts(ts_datetime, self.last_dailydata_timestamp):
+            self.debug(f"process_chart_data: Looking at data for ts {ts}")
+            if is_new_daily_ts(ts_datetime, self.last_dailydata_timestamp):
                 # solar generation = feedin + direct consumption
                 # house user = direct consumption + grid
                 entry = (ts_datetime.isoformat(), data_dict["grid"], data_dict["direct"] + data_dict["feedin"], data_dict["direct"] + data_dict["grid"])
@@ -203,7 +212,10 @@ class SolarWeb:
                     self.sqlcon.execute("INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", entry)
                     last_insert_ts = ts_datetime
             else:
-                print("We already have this ts in the table or it's too new")
+                if is_daily_ts_newer_than_last_dailydata_timestamp(ts_datetime, self.last_dailydata_timestamp):
+                    self.debug("We already have this ts in the table")
+                else:
+                    self.debug("This ts is too new. We can't process daily data until the day is done")
         if last_insert_ts != None:
             self.last_dailydata_timestamp = last_insert_ts
             print(f"process_chart_data: New last_dailydata_timestamp = {self.last_dailydata_timestamp}")
