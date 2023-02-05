@@ -222,9 +222,10 @@ class SolarWeb:
                     last_insert_ts = ts_datetime
             else:
                 if is_daily_ts_newer_than_last_dailydata_timestamp(ts_datetime, self.last_dailydata_timestamp):
-                    self.debug("We already have this ts in the table")
-                else:
                     self.debug("This ts is too new. We can't process daily data until the day is done")
+                else:
+                    self.debug("We already have this ts in the table")
+                    
         if last_insert_ts != None:
             self.last_dailydata_timestamp = last_insert_ts
             self.debug(f"process_chart_data: New last_dailydata_timestamp = {self.last_dailydata_timestamp}")
