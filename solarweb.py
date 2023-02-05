@@ -93,12 +93,16 @@ class SolarWeb:
             return False
         session_data_key = query_dict['sessionDataKey'][0]
         # Login to fronius
-        commonauth = self.requests_session.post("https://login.fronius.com/commonauth", data={
-            "sessionDataKey": session_data_key,
-            "username": self.config["username"],
-            "password": self.config["password"],
-            "chkRemember": "on"
-        })
+        try:
+            commonauth = self.requests_session.post("https://login.fronius.com/commonauth", data={
+                "sessionDataKey": session_data_key,
+                "username": self.config["username"],
+                "password": self.config["password"],
+                "chkRemember": "on"
+            })
+        except requests.exceptions.ConnectionError as e:
+            print(f"Connection error accessing https://login.fronius.com/commonauth: {e}")
+            return False
         if commonauth.status_code != 200:
             print("Error: posting to commonauth")
             self.debug(commonauth)
