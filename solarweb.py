@@ -271,7 +271,7 @@ class SolarWeb:
                         solar = convert_kwh_fn(solar / num_samples)
                         home = convert_kwh_fn(home / num_samples)
                     with self.sqlcon:
-                        self.debug(f"consolidate_data: INSERT INTO {table} (timestamp, grid, solar, home) VALUES ({cur_timestamp.isoformat()}, {grid}, {solar}, {home})")
+                        self.debug(f"consolidate_data: INSERT INTO {table} (timestamp, grid, solar, home) VALUES ({cur_timestamp.isoformat()}, {grid:.2f}, {solar:.2f}, {home:.2f})")
                         self.sqlcon.execute(f"INSERT INTO {table} (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)",
                             (cur_timestamp.isoformat(), grid, solar, home))
                 else:
@@ -395,7 +395,7 @@ class SolarWeb:
 
                     try:
                         with self.sqlcon:
-                            self.debug(f"run: INSERT INTO samples (timestamp, grid, solar, home) VALUES ({pvdata_record['datetime']}, {grid}, {pv}, {home})")
+                            self.debug(f"run: INSERT INTO samples (timestamp, grid, solar, home) VALUES ({pvdata_record['datetime']}, {grid:.2f}, {pv:.2f}, {home:.2f})")
                             self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
                                 (pvdata_record["datetime"], grid, pv, home))
                     except sqlite3.OperationalError as e:
