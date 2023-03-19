@@ -112,13 +112,17 @@ class SolarWeb:
 
         # Register login with Solarweb
         soup = BeautifulSoup(commonauth.text, 'html.parser')
-        commonauth_form_data = {
-            "code": soup.find("input", attrs={"name": "code"}).attrs["value"],
-            "id_token": soup.find("input", attrs={"name": "id_token"}).attrs["value"],
-            "state": soup.find("input", attrs={"name": "state"}).attrs["value"],
-            "AuthenticatedIdPs": soup.find("input", attrs={"name": "AuthenticatedIdPs"}).attrs["value"],
-            "session_state": soup.find("input", attrs={"name": "session_state"}).attrs["value"],
-        }
+        try:
+            commonauth_form_data = {
+                "code": soup.find("input", attrs={"name": "code"}).attrs["value"],
+                "id_token": soup.find("input", attrs={"name": "id_token"}).attrs["value"],
+                "state": soup.find("input", attrs={"name": "state"}).attrs["value"],
+                "AuthenticatedIdPs": soup.find("input", attrs={"name": "AuthenticatedIdPs"}).attrs["value"],
+                "session_state": soup.find("input", attrs={"name": "session_state"}).attrs["value"],
+            }
+        except AttributeError as e:
+            print(f"Exception when parsing commonauth form data: {e}")
+            return False
         try:
             external_login_callback = self.requests_session.post("https://www.solarweb.com/Account/ExternalLoginCallback", data=commonauth_form_data)
         except requests.exceptions.ConnectionError as e:
