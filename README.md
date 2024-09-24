@@ -1,4 +1,4 @@
-# pictureframe
+# Solar Logging
 
 A python program that logs the status of a Fronius PV inverter to a sqlite DB.
 
