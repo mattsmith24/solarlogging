@@ -6,6 +6,7 @@ from collections import defaultdict
 import sqlite3
 import appdirs
 import os
+from pathlib import Path
 
 import requests
 from urllib.parse import urlparse
@@ -13,8 +14,7 @@ from urllib.parse import parse_qs
 from bs4 import BeautifulSoup
 
 SOLARLOGGING_DATA_DIR = appdirs.user_data_dir("solarlogging", "mattsmith24")
-SOLARLOGGING_DB_PATH = os.path.join(SOLARLOGGING_DATA_DIR, "solarlogging.db")
-print(f"SOLARLOGGING_DB_PATH={SOLARLOGGING_DB_PATH}")
+SOLARLOGGING_DB_PATH = Path(SOLARLOGGING_DATA_DIR, "solarlogging.db")
 
 
 def is_daily_ts_newer_than_last_dailydata_timestamp(ts_datetime, last_dailydata_timestamp):
@@ -39,8 +39,12 @@ def is_new_daily_ts(ts_datetime, last_dailydata_timestamp):
     )
 
 class SolarWeb:
-    def __init__(self, debug=False) -> None:
+    def __init__(self, debug=False, database="") -> None:
         self.debug_enabled = debug
+        self.database = SOLARLOGGING_DB_PATH
+        if database:
+            self.database = Path(database)
+        print(f"database={self.database.resolve()}")
         self.config = None
         self.last_dailydata_timestamp = None
         self.requests_session = None
@@ -54,8 +58,8 @@ class SolarWeb:
 
 
     def init_dailydata(self):
-        os.makedirs(SOLARLOGGING_DATA_DIR, exist_ok=True)
-        self.sqlcon = sqlite3.connect(SOLARLOGGING_DB_PATH)
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self.sqlcon = sqlite3.connect(self.database)
         self.sqlcon.row_factory = sqlite3.Row
 
         self.debug("init_dailydata: Initialising tables")
@@ -463,13 +467,14 @@ def main():
                         help='Process daily history since install date then exit. This will erase existing daily data (make a backup)')
     parser.add_argument('--debug', action='store_true',
                         help='Print debug messages')
+    parser.add_argument('--database', help='Path to sqlite3 database')
 
     args = parser.parse_args()
     if args.history:
         history()
         exit()
 
-    solar_web = SolarWeb(debug=args.debug)
+    solar_web = SolarWeb(debug=args.debug, database=args.database)
     solar_web.run()
 
  

@@ -2,12 +2,6 @@
 
 A python program that logs the status of a Fronius PV inverter to a sqlite DB.
 
-Required python modules:
-
-- requests
-- beautifulsoup4
-- appdirs
-
 Configuration is via a solarweb.json file with the following format:
 
 ```json
@@ -29,3 +23,24 @@ To run it type `python solarweb.py --history`.
 
 For debugging, run with `python solarweb.py --debug`. This will print messages about
 the data that is being inserted to the database.
+
+# Install
+
+```
+python3 -m venv .venv
+.venv/bin/pip3 install -r requirements.txt
+```
+
+Then to run it, use .venv/bin/python3 solarweb.py
+
+# Deploy
+
+Edit run.sh and solarlogging.service to use the paths you want.
+
+```
+sudo cp solarlogging.service to /etc/systemd/system
+sudo systemctl daemon-reload
+sudo systemctl enable solarlogging
+sudo systemctl start solarlogging
+```
+
