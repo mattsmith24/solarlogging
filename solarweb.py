@@ -5,7 +5,7 @@ import argparse
 from collections import defaultdict
 import sqlite3
 import appdirs
-import os
+import sys
 from pathlib import Path
 
 import requests
@@ -15,6 +15,9 @@ from bs4 import BeautifulSoup
 
 SOLARLOGGING_DATA_DIR = appdirs.user_data_dir("solarlogging", "mattsmith24")
 SOLARLOGGING_DB_PATH = Path(SOLARLOGGING_DATA_DIR, "solarlogging.db")
+
+# Make stdout line-buffered (i.e. each line will be automatically flushed):
+sys.stdout.reconfigure(line_buffering=True)
 
 
 def is_daily_ts_newer_than_last_dailydata_timestamp(ts_datetime, last_dailydata_timestamp):

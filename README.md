@@ -35,9 +35,11 @@ Then to run it, use .venv/bin/python3 solarweb.py
 
 # Deploy
 
-Edit run.sh and solarlogging.service to use the paths you want.
+Copy files to /opt/solarlogging
 
 ```
+sudo useradd -r solarlogging
+sudo chown -R solarlogging /opt/solarlogging
 sudo cp solarlogging.service to /etc/systemd/system
 sudo systemctl daemon-reload
 sudo systemctl enable solarlogging

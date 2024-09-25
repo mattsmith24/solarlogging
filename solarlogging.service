@@ -1,14 +1,13 @@
 [Unit]
 Description=Solar Logging Service
-After=multi-user.target
-Conflicts=getty@tty1.service
+After=network.target
  
 [Service]
-Type=simple
-User=matt
-Group=matt
-ExecStart=/home/matt/solarlogging/run.sh
-StandardInput=tty-force
+Type=exec
+User=solarlogging
+Group=solarlogging
+ExecStart=/opt/solarlogging/run.sh
+SyslogIdentifier=solarlogging
  
 [Install]
 WantedBy=multi-user.target
