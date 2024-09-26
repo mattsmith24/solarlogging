@@ -7,6 +7,7 @@ Type=exec
 User=solarlogging
 Group=solarlogging
 ExecStart=/opt/solarlogging/run.sh
+Restart=always
 SyslogIdentifier=solarlogging
  
 [Install]

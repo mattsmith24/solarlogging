@@ -367,8 +367,7 @@ class SolarWeb:
                     actual_data = self.requests_session.get(actual_data_url)
                 except requests.exceptions.ConnectionError as e:
                     self.debug(f"Exception while accessing: {actual_data_url}")
-                    self.debug(e.strerror)
-                    self.debug(e.winerror)
+                    self.debug(str(e))
                     break
                 if actual_data.status_code != 200:
                     self.debug(actual_data)
@@ -379,8 +378,7 @@ class SolarWeb:
                     pvdata_record = actual_data.json()
                 except requests.exceptions.JSONDecodeError as e:
                     self.debug(f"Exception while decoding pvdata")
-                    self.debug(e.strerror)
-                    self.debug(e.winerror)
+                    self.debug(str(e))
                     self.debug(actual_data)
                     self.debug(actual_data.url)
                     self.debug(actual_data.text)
