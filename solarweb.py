@@ -100,72 +100,93 @@ class DataAggregator(ABC):
         last_source_timestamp = None
         for row in cur.execute(f"SELECT * from {self.source_table} order by id desc limit 1"):
             last_source_timestamp = datetime.datetime.fromisoformat(row["timestamp"])
-        if last_source_timestamp != None:
-            # Assume last_timestamp lines up with a slot start. The five minute slots are recorded
-            # with the timestamp at the start of the slot.
-            cur_timestamp = self.time_slot_increment(last_aggregate_timestamp)
-            aggregate_rows = []
-            # Attempt to query about 100 slots worth of data at a time.
-            source_data = []
-            query_end_timestamp = self.time_slot_increment(cur_timestamp, 1000)
+        if last_source_timestamp is None:
+            self.debug(f"process_aggregation: {self.table}: No source data found")
+            return
+        # Assume last_timestamp lines up with a slot start. The five minute slots are recorded
+        # with the timestamp at the start of the slot.
+        cur_timestamp = self.time_slot_increment(last_aggregate_timestamp)
+        aggregate_rows = []
+        # Attempt to query about 100 slots worth of data at a time.
+        source_data = []
+        while not self.deadline_expired(deadline):
+            query_end_timestamp = self.time_slot_increment(cur_timestamp, 2000)
             for row in cur.execute(f"SELECT * from {self.source_table} WHERE timestamp >= ? and timestamp < ? order by id asc",
                     (cur_timestamp.isoformat(), query_end_timestamp.isoformat())):
                 source_data.append(row)
-            # Loop through as many slots as we can before time limit
-            while source_data \
-                    and cur_timestamp < self.time_slot(datetime.datetime.fromisoformat(source_data[-1]["timestamp"])) \
-                    and not self.deadline_expired(deadline):
-                cur_end_timestamp = self.time_slot_increment(cur_timestamp)
-                grid = 0
-                solar = 0
-                home = 0
-                num_samples = 0
-                rows = [row for row in source_data
-                            if datetime.datetime.fromisoformat(row["timestamp"]) >= cur_timestamp
-                            and datetime.datetime.fromisoformat(row["timestamp"]) < cur_end_timestamp]
-                for row in rows:
-                    # Only accumulate +ve grid usage. Feedin can be calculated from 'home - solar'
-                    if row['grid'] > 0:
-                        grid += row['grid']
-                    solar += row['solar']
-                    home += row['home']
-                    num_samples += 1
-                if grid > 0.0 or solar > 0.0 or home > 0.0:
-                    grid = self.convert_units(grid, num_samples)
-                    solar = self.convert_units(solar, num_samples)
-                    home = self.convert_units(home, num_samples)
-                    with self.sqlcon:
-                        aggregate_rows.append(
-                            {
-                                "timestamp": cur_timestamp.isoformat(),
-                                "grid": grid,
-                                "solar": solar,
-                                "home": home
-                            }
-                        )
-                        self.debug(f"aggregate_data: {self.table}: ({cur_timestamp.isoformat()}, {grid:.2f}, {solar:.2f}, {home:.2f})")
-                else:
-                    # if there are large gaps in the data then sometimes this loop hits the deadline
-                    # before it can find the end of the gap. In that case, this function will be run again
-                    # from the last good timestamp, hit the gap, timeout and never get past that point.
-                    # To avoid this, skip ahead to the next point in the source data that is greater
-                    # than the cur_timestamp
-                    rows = [row for row in source_data
-                            if datetime.datetime.fromisoformat(row["timestamp"]) > cur_timestamp
-                            and (row["grid"] != 0 or row["solar"] != 0 or row["home"] != 0)]
-                    if len(rows) > 0:
-                        row = rows[0]
-                        cur_end_timestamp = self.time_slot(datetime.datetime.fromisoformat(row["timestamp"]))
-                        self.debug(f"process_aggregation {self.table}: Skip to cur_timestamp={cur_end_timestamp}")
-                cur_timestamp = cur_end_timestamp
-            if len(aggregate_rows) > 0:
+            self.debug(f"aggregate_data: {self.table}: Found {len(source_data)} rows from {cur_timestamp} to {query_end_timestamp}")
+            # We must get at least one slot worth of data or reach the end of the source data
+            if datetime.datetime.fromisoformat(source_data[-1]["timestamp"]) >= self.time_slot_increment(cur_timestamp):
+                self.debug(f"aggregate_data: {self.table}: Found at least one slot worth of data")
+                break
+            if datetime.datetime.fromisoformat(source_data[-1]["timestamp"]) >= last_source_timestamp:
+                self.debug(f"aggregate_data: {self.table}: Reached end of data. Not enough data to aggregate")
+                break
+            else:
+                # Look for the next slot that has data in it. There may be gaps in the data
+                found_more_data = False
+                for row in cur.execute(f"SELECT * from {self.source_table} where timestamp > ? \
+                    and (grid != 0 or solar != 0 or home != 0) order by id asc limit 1",
+                    (self.time_slot_increment(cur_timestamp).isoformat(),)):
+                    cur_timestamp = self.time_slot(datetime.datetime.fromisoformat(row["timestamp"]))
+                    found_more_data = True
+                    self.debug(f"aggregate_data: {self.table}: Found more data after gap at cur_timestamp={cur_timestamp}")
+                if not found_more_data:
+                    self.debug(f"aggregate_data: {self.table}: No more data found after {cur_timestamp}")
+                    break
+
+        # Loop through as many slots as we can before time limit
+        while source_data \
+                and cur_timestamp < self.time_slot(datetime.datetime.fromisoformat(source_data[-1]["timestamp"])) \
+                and not self.deadline_expired(deadline):
+            cur_end_timestamp = self.time_slot_increment(cur_timestamp)
+            grid = 0
+            solar = 0
+            home = 0
+            num_samples = 0
+            rows = [row for row in source_data
+                        if datetime.datetime.fromisoformat(row["timestamp"]) >= cur_timestamp
+                        and datetime.datetime.fromisoformat(row["timestamp"]) < cur_end_timestamp]
+            for row in rows:
+                # Only accumulate +ve grid usage. Feedin can be calculated from 'home - solar'
+                if row['grid'] > 0:
+                    grid += row['grid']
+                solar += row['solar']
+                home += row['home']
+                num_samples += 1
+            if grid > 0.0 or solar > 0.0 or home > 0.0:
+                grid = self.convert_units(grid, num_samples)
+                solar = self.convert_units(solar, num_samples)
+                home = self.convert_units(home, num_samples)
                 with self.sqlcon:
-                    self.debug(f"process_aggregation: Inserting {len(aggregate_rows)} rows into {self.table}")
-                    self.sqlcon.executemany(
-                        f"INSERT INTO {self.table} (timestamp, grid, solar, home) VALUES (:timestamp, :grid, :solar, :home)",
-                        aggregate_rows
+                    aggregate_rows.append(
+                        {
+                            "timestamp": cur_timestamp.isoformat(),
+                            "grid": grid,
+                            "solar": solar,
+                            "home": home
+                        }
                     )
-            self.debug(f"process_aggregation: {self.table}: done")
+                    self.debug(f"aggregate_data: {self.table}: ({cur_timestamp.isoformat()}, {grid:.2f}, {solar:.2f}, {home:.2f})")
+            else:
+                # Skip ahead to the next point in the source data that is
+                # greater than the cur_timestamp
+                rows = [row for row in source_data
+                        if datetime.datetime.fromisoformat(row["timestamp"]) > cur_timestamp
+                        and (row["grid"] != 0 or row["solar"] != 0 or row["home"] != 0)]
+                if len(rows) > 0:
+                    row = rows[0]
+                    cur_end_timestamp = self.time_slot(datetime.datetime.fromisoformat(row["timestamp"]))
+                    self.debug(f"process_aggregation {self.table}: Skip to cur_timestamp={cur_end_timestamp}")
+            cur_timestamp = cur_end_timestamp
+        if len(aggregate_rows) > 0:
+            with self.sqlcon:
+                self.debug(f"process_aggregation: Inserting {len(aggregate_rows)} rows into {self.table}")
+                self.sqlcon.executemany(
+                    f"INSERT INTO {self.table} (timestamp, grid, solar, home) VALUES (:timestamp, :grid, :solar, :home)",
+                    aggregate_rows
+                )
+        self.debug(f"process_aggregation: {self.table}: done")
 
 class FiveMinuteAggregator(DataAggregator):
     def __init__(self, sqlcon, debug=False):
