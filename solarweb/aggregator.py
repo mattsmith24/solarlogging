@@ -128,17 +128,18 @@ class DataAggregator(ABC):
                 
             self.debug(f"aggregate_data: {self.table}: Found {len(source_data)} rows from {slot_start_timestamp} to {query_end_timestamp}")
             
-            # We must get at least one slot worth of data or reach the end of the source data
-            last_timestamp = datetime.fromisoformat(source_data[-1]["timestamp"])
-            if last_timestamp >= self.time_slot_increment(slot_start_timestamp):
-                self.debug(f"aggregate_data: {self.table}: Found at least one slot worth of data")
-                break
-                
-            if last_timestamp >= last_source_timestamp:
-                self.debug(f"aggregate_data: {self.table}: Reached end of data. Not enough data to aggregate")
-                break
-                
-            # Look for next slot with data
+            if source_data:
+                # We must get at least one slot worth of data or reach the end of the source data
+                last_timestamp = datetime.fromisoformat(source_data[-1]["timestamp"])
+                if last_timestamp >= self.time_slot_increment(slot_start_timestamp):
+                    self.debug(f"aggregate_data: {self.table}: Found at least one slot worth of data")
+                    break
+                    
+                if last_timestamp >= last_source_timestamp:
+                    self.debug(f"aggregate_data: {self.table}: Reached end of data. Not enough data to aggregate")
+                    break
+                    
+            # Look for next slot with data so we handle gaps in the data
             found_more_data = False
             for row in cur.execute(
                 f"SELECT * from {self.source_table} where timestamp > ? and (grid != 0 or solar != 0 or home != 0) order by id asc limit 1",
