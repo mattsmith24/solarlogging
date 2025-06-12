@@ -376,12 +376,27 @@ class MonthlyAggregator(DataAggregator):
         return value
 
 class SolarWeb:
+    """Main class for interacting with SolarWeb API and managing solar data.
+    
+    This class handles:
+    - Authentication with SolarWeb
+    - Fetching real-time and historical solar data
+    - Storing data in SQLite database
+    - Aggregating data into different time intervals
+    """
+    
     def __init__(self, debug=False, database="") -> None:
+        """Initialize SolarWeb client.
+        
+        Args:
+            debug: Enable debug logging
+            database: Optional path to SQLite database file
+        """
         self.debug_enabled = debug
-        self.database = SOLARLOGGING_DB_PATH
-        if database:
-            self.database = Path(database)
+        self.database = SOLARLOGGING_DB_PATH if not database else Path(database)
         print(f"database={self.database.resolve()}")
+        
+        # Initialize instance variables
         self.config = None
         self.last_dailydata_timestamp = None
         self.requests_session = None
@@ -389,130 +404,237 @@ class SolarWeb:
         self.sqlcon = None
         self.last_login_attempt = None
         self.sampling_ok = False
-
+        self.next_sample_time = None
 
     def debug(self, msg):
+        """Log debug message if debug mode is enabled."""
         if self.debug_enabled:
             print(msg)
 
-
     def init_dailydata(self):
+        """Initialize database and tables for storing solar data."""
         self.database.parent.mkdir(parents=True, exist_ok=True)
         self.sqlcon = sqlite3.connect(self.database)
         self.sqlcon.row_factory = sqlite3.Row
 
         self.debug("init_dailydata: Initialising tables")
         with self.sqlcon:
-            cur = self.sqlcon.execute("create table if not exists samples (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
-            cur.execute("create table if not exists daily (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
-            cur.execute("create table if not exists fiveminute (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
-            cur.execute("create table if not exists hourly (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
-            cur.execute("create table if not exists weekly (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
-            cur.execute("create table if not exists monthly (id INTEGER PRIMARY KEY AUTOINCREMENT, grid real, solar real, home real, timestamp text)")
+            cur = self.sqlcon.cursor()
+            # Create tables if they don't exist
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS samples (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS daily (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS fiveminute (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS hourly (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS weekly (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS monthly (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
 
+        # Get last daily data timestamp
         cur = self.sqlcon.cursor()
         for row in cur.execute("SELECT * from daily order by id desc limit 1"):
             self.last_dailydata_timestamp = datetime.fromisoformat(row["timestamp"])
 
-
     def login(self):
+        """Authenticate with SolarWeb and get PV system ID.
+        
+        Returns:
+            bool: True if login successful, False otherwise
+        """
         print("Logging into solarweb")
-        if self.requests_session != None:
+        
+        # Close existing session if any
+        if self.requests_session is not None:
             self.requests_session.close()
         self.requests_session = requests.Session()
-        # Get a session
+
         try:
+            # Get initial session
             external_login = self.requests_session.get("https://www.solarweb.com/Account/ExternalLogin")
-        except requests.exceptions.ConnectionError as e:
-            print(f"Connection error accessing ExternalLogin: {e}")
-            return False
-        parsed_url = urlparse(external_login.url)
-        query_dict = parse_qs(parsed_url.query)
-        if external_login.status_code != 200 or not ("sessionDataKey" in query_dict):
-            print("Error: Couldn't parse sessionDataKey from URL")
-            self.debug(external_login)
-            self.debug(external_login.url)
-            self.debug(external_login.text)
-            return False
-        session_data_key = query_dict['sessionDataKey'][0]
-        # Login to fronius
-        try:
-            commonauth = self.requests_session.post("https://login.fronius.com/commonauth", data={
-                "sessionDataKey": session_data_key,
-                "username": self.config["username"],
-                "password": self.config["password"],
-                "chkRemember": "on"
-            })
-        except requests.exceptions.ConnectionError as e:
-            print(f"Connection error accessing https://login.fronius.com/commonauth: {e}")
-            return False
-        if commonauth.status_code != 200:
-            print("Error: posting to commonauth")
-            self.debug(commonauth)
-            self.debug(commonauth.url)
-            self.debug(commonauth.text)
-            return False
+            if external_login.status_code != 200:
+                print("Error: Failed to access ExternalLogin")
+                self.debug(external_login)
+                self.debug(external_login.url)
+                self.debug(external_login.text)
+                return False
 
-        # Register login with Solarweb
-        soup = BeautifulSoup(commonauth.text, 'html.parser')
-        try:
-            commonauth_form_data = {
-                "code": soup.find("input", attrs={"name": "code"}).attrs["value"],
-                "id_token": soup.find("input", attrs={"name": "id_token"}).attrs["value"],
-                "state": soup.find("input", attrs={"name": "state"}).attrs["value"],
-                "AuthenticatedIdPs": soup.find("input", attrs={"name": "AuthenticatedIdPs"}).attrs["value"],
-                "session_state": soup.find("input", attrs={"name": "session_state"}).attrs["value"],
-            }
-        except AttributeError as e:
-            print(f"Exception when parsing commonauth form data: {e}")
-            return False
-        try:
-            external_login_callback = self.requests_session.post("https://www.solarweb.com/Account/ExternalLoginCallback", data=commonauth_form_data)
+            # Parse session data key
+            parsed_url = urlparse(external_login.url)
+            query_dict = parse_qs(parsed_url.query)
+            if "sessionDataKey" not in query_dict:
+                print("Error: Couldn't parse sessionDataKey from URL")
+                self.debug(external_login)
+                self.debug(external_login.url)
+                self.debug(external_login.text)
+                return False
+            session_data_key = query_dict['sessionDataKey'][0]
+
+            # Login to Fronius
+            commonauth = self.requests_session.post(
+                "https://login.fronius.com/commonauth",
+                data={
+                    "sessionDataKey": session_data_key,
+                    "username": self.config["username"],
+                    "password": self.config["password"],
+                    "chkRemember": "on"
+                }
+            )
+            if commonauth.status_code != 200:
+                print("Error: Failed to post to commonauth")
+                self.debug(commonauth)
+                self.debug(commonauth.url)
+                self.debug(commonauth.text)
+                return False
+
+            # Parse login response
+            soup = BeautifulSoup(commonauth.text, 'html.parser')
+            try:
+                commonauth_form_data = {
+                    "code": soup.find("input", attrs={"name": "code"}).attrs["value"],
+                    "id_token": soup.find("input", attrs={"name": "id_token"}).attrs["value"],
+                    "state": soup.find("input", attrs={"name": "state"}).attrs["value"],
+                    "AuthenticatedIdPs": soup.find("input", attrs={"name": "AuthenticatedIdPs"}).attrs["value"],
+                    "session_state": soup.find("input", attrs={"name": "session_state"}).attrs["value"],
+                }
+            except AttributeError as e:
+                print(f"Exception when parsing commonauth form data: {e}")
+                return False
+
+            # Complete login process
+            external_login_callback = self.requests_session.post(
+                "https://www.solarweb.com/Account/ExternalLoginCallback",
+                data=commonauth_form_data
+            )
+            if external_login_callback.status_code != 200:
+                print("Error: Failed to complete login process")
+                self.debug(external_login_callback)
+                self.debug(external_login_callback.url)
+                self.debug(external_login_callback.text)
+                return False
+
+            # Get PV system ID
+            parsed_url = urlparse(external_login_callback.url)
+            query_dict = parse_qs(parsed_url.query)
+            if 'pvSystemId' not in query_dict:
+                print("Error: Couldn't parse pvSystemId from URL")
+                self.debug(external_login_callback)
+                self.debug(external_login_callback.url)
+                self.debug(external_login_callback.text)
+                return False
+
+            self.pv_system_id = query_dict['pvSystemId'][0]
+            print("Logged into solarweb. Begin polling data")
+            return True
+
         except requests.exceptions.ConnectionError as e:
-            print(f"Exception when posting ExternalLoginCallback: {e}")
+            print(f"Connection error during login: {e}")
             return False
-
-        # Get PV system ID
-        parsed_url = urlparse(external_login_callback.url)
-        query_dict = parse_qs(parsed_url.query)
-        if external_login_callback.status_code != 200 or not ('pvSystemId' in query_dict):
-            print("Error: Couldn't parse pvSystemId from URL")
-            self.debug(external_login_callback)
-            self.debug(external_login_callback.url)
-            self.debug(external_login_callback.text)
-            return False
-        self.pv_system_id = query_dict['pvSystemId'][0]
-        print("Logged into solarweb. Begin polling data")
-        return True
-
 
     def get_chart(self, chartday, interval, view):
+        """Get chart data from SolarWeb.
+        
+        Args:
+            chartday: Date to get data for
+            interval: Data interval (e.g. 'month')
+            view: Data view type (e.g. 'production', 'consumption')
+            
+        Returns:
+            dict: Chart data or None if request failed
+        """
         try:
-            chart_data = self.requests_session.get(f"https://www.solarweb.com/Chart/GetChartNew?pvSystemId={self.pv_system_id}&year={chartday.year}&month={chartday.month}&day={chartday.day}&interval={interval}&view={view}")
+            chart_data = self.requests_session.get(
+                f"https://www.solarweb.com/Chart/GetChartNew",
+                params={
+                    "pvSystemId": self.pv_system_id,
+                    "year": chartday.year,
+                    "month": chartday.month,
+                    "day": chartday.day,
+                    "interval": interval,
+                    "view": view
+                }
+            )
+            
             if chart_data.status_code != 200:
                 self.debug(chart_data)
                 self.debug(chart_data.url)
                 self.debug(chart_data.text)
                 return None
+                
             jsonchart = chart_data.json()
             if not jsonchart:
                 self.debug("get_chart: no json data returned")
                 return None
+                
             return jsonchart
+            
         except requests.exceptions.ConnectionError as e:
             self.debug(f"Exception reading chart for {chartday.year}-{chartday.month}-{chartday.day} {interval} {view}")
             self.debug(f"{e}")
             return None
 
-
     def process_chart_data(self, yesterday):
-        # Chart data is a json structure that wraps an array of timestamp / kwh values.
-        # The timestamps can be parsed with datetime.fromtimestamp(val / 1000, tz=timezone.utc)
+        """Process chart data for a given date.
+        
+        Args:
+            yesterday: Date to process data for
+            
+        Returns:
+            bool: True if processing successful, False otherwise
+        """
+        # Get production data
         chart_month_production = self.get_chart(yesterday, "month", "production")
-        if chart_month_production == None:
+        if chart_month_production is None:
             return False
 
         self.debug(f"process_chart_data: last_dailydata_timestamp = {self.last_dailydata_timestamp}")
+        
+        # Check for new data
         found_new_data = False
         for data_tuple in chart_month_production["settings"]["series"][0]["data"]:
             self.debug(f"process_chart_data: chart_month_production ts = {data_tuple[0]}")
@@ -521,51 +643,66 @@ class SolarWeb:
                 found_new_data = True
                 self.debug("Timestamp is new")
                 break
+                
         if not found_new_data:
             self.debug("process_chart_data: No new timestamps")
             return True
 
-        # Get cumulative solar consumption data for the current month
+        # Get consumption data
         chart_month_consumption = self.get_chart(yesterday, "month", "consumption")
-        if chart_month_consumption == None:
+        if chart_month_consumption is None:
             return False
 
-        # Extract the data series from the charts
+        # Extract data series
         daily_data_tuples = {}
         for series in chart_month_production["settings"]["series"]:
             if series["name"] == "Energy to grid":
                 daily_data_tuples["feedin"] = series["data"]
             if series["name"] == "Consumed directly":
                 daily_data_tuples["direct"] = series["data"]
+                
         for series in chart_month_consumption["settings"]["series"]:
             if series["name"] == "Energy from grid":
                 daily_data_tuples["grid"] = series["data"]
-        # Rearrange the series to group all series by timestamp
+
+        # Group data by timestamp
         daily_data_dict = {}
         for label in ["grid", "feedin", "direct"]:
             for tuple in daily_data_tuples[label]:
                 ts = tuple[0]
                 if ts not in daily_data_dict:
-                    # Using defaultdict here will handle cases where these is a missing series for a timestamp
-                    # and just return 0 in the next loop
                     daily_data_dict[ts] = defaultdict(int)
                 daily_data_dict[ts][label] = tuple[1]
-        # Ensure records are processed in order of timestamp, not by the whims of the dict key fn
-        timestamps = list(daily_data_dict.keys())
-        timestamps.sort(
-            key = lambda ts: datetime.fromtimestamp(int(ts)/1000, tz=timezone.utc))
+
+        # Process data in timestamp order
+        timestamps = sorted(
+            daily_data_dict.keys(),
+            key=lambda ts: datetime.fromtimestamp(int(ts)/1000, tz=timezone.utc)
+        )
+        
         last_insert_ts = None
         for ts in timestamps:
             data_dict = daily_data_dict[ts]
             ts_datetime = datetime.fromtimestamp(int(ts)/1000, tz=timezone.utc)
             self.debug(f"process_chart_data: Looking at data for ts {ts}")
+            
             if is_new_timestamp(ts_datetime, self.last_dailydata_timestamp):
-                # solar generation = feedin + direct consumption
-                # house user = direct consumption + grid
-                entry = (ts_datetime.isoformat(), data_dict["grid"], data_dict["direct"] + data_dict["feedin"], data_dict["direct"] + data_dict["grid"])
+                # Calculate values:
+                # solar = feedin + direct consumption
+                # home = direct consumption + grid
+                entry = (
+                    ts_datetime.isoformat(),
+                    data_dict["grid"],
+                    data_dict["direct"] + data_dict["feedin"],
+                    data_dict["direct"] + data_dict["grid"]
+                )
+                
                 with self.sqlcon:
                     self.debug(f"process_chart_data: INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?), {entry}")
-                    self.sqlcon.execute("INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", entry)
+                    self.sqlcon.execute(
+                        "INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)",
+                        entry
+                    )
                     last_insert_ts = ts_datetime
             else:
                 if timestamp_newer_than(ts_datetime, self.last_dailydata_timestamp):
@@ -573,86 +710,100 @@ class SolarWeb:
                 else:
                     self.debug("We already have this ts in the table")
                     
-        if last_insert_ts != None:
+        if last_insert_ts is not None:
             self.last_dailydata_timestamp = last_insert_ts
             self.debug(f"process_chart_data: New last_dailydata_timestamp = {self.last_dailydata_timestamp}")
+            
         return True
 
-
     def aggregate_data(self, deadline):
+        """Aggregate data into different time intervals.
+        
+        Args:
+            deadline: Processing deadline
+        """
         FiveMinuteAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
         HourlyAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
         WeeklyAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
         MonthlyAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
 
-
     def load_config(self):
+        """Load configuration from solarweb.json."""
         with open("solarweb.json") as fd:
             self.config = json.load(fd)
 
     def get_realtime_data(self):
-        # Get realtime solar data
-        try:
-            actual_data_url = f"https://www.solarweb.com/ActualData/GetCompareDataForPvSystem?pvSystemId={self.pv_system_id}"
-            actual_data = self.requests_session.get(actual_data_url)
-        except requests.exceptions.ConnectionError as e:
-            self.debug(f"Exception while accessing: {actual_data_url}")
-            self.debug(str(e))
-            return None
-        if actual_data.status_code != 200:
-            self.debug(actual_data)
-            self.debug(actual_data.url)
-            self.debug(actual_data.text)
-            return None
-        try:
-            pvdata_record = actual_data.json()
-            return pvdata_record
-        except requests.exceptions.JSONDecodeError as e:
-            self.debug(f"Exception while decoding pvdata")
-            self.debug(str(e))
-            self.debug(actual_data)
-            self.debug(actual_data.url)
-            self.debug(actual_data.text)
-            return None
+        """Get real-time solar data from SolarWeb.
         
+        Returns:
+            dict: Real-time data or None if request failed
+        """
+        try:
+            actual_data = self.requests_session.get(
+                "https://www.solarweb.com/ActualData/GetCompareDataForPvSystem",
+                params={"pvSystemId": self.pv_system_id}
+            )
+            
+            if actual_data.status_code != 200:
+                self.debug(actual_data)
+                self.debug(actual_data.url)
+                self.debug(actual_data.text)
+                return None
+                
+            return actual_data.json()
+            
+        except (requests.exceptions.ConnectionError, requests.exceptions.JSONDecodeError) as e:
+            self.debug(f"Exception while getting realtime data: {e}")
+            return None
+
     def throttled_login(self):
-        # Delay logging in if we just made an attempt
-        if self.last_login_attempt != None and (datetime.now() - self.last_login_attempt).seconds < 30:
+        """Attempt login with rate limiting.
+        
+        Returns:
+            bool: True if login successful, False otherwise
+        """
+        # Delay login if we just made an attempt
+        if self.last_login_attempt is not None and (datetime.now() - self.last_login_attempt).seconds < 30:
             time.sleep(1)
             return False
 
         self.last_login_attempt = datetime.now()
         self.sampling_ok = False
         return self.login()
-    
+
     def poll_realtime_data(self):
+        """Poll and store real-time solar data.
+        
+        Returns:
+            bool: True if polling successful, False otherwise
+        """
         pvdata_record = self.get_realtime_data()
-        if pvdata_record == None:
+        if pvdata_record is None:
             return False
         
         sample_time = datetime.now(timezone.utc)
         self.next_sample_time = sample_time + timedelta(seconds=30)
         pvdata_record["datetime"] = sample_time.isoformat()
-        if "IsOnline" in pvdata_record and pvdata_record["IsOnline"] and "P_Grid" in pvdata_record \
-                and "P_PV" in pvdata_record and "P_Load" in pvdata_record:
+        
+        if ("IsOnline" in pvdata_record and pvdata_record["IsOnline"] and 
+            "P_Grid" in pvdata_record and "P_PV" in pvdata_record and "P_Load" in pvdata_record):
+            
             if not self.sampling_ok:
                 self.sampling_ok = True
                 print("Online")
-            grid = 0
-            if pvdata_record['P_Grid'] != None:
-                grid = pvdata_record['P_Grid']
-            pv = 0
-            if pvdata_record['P_PV'] != None:
-                pv = pvdata_record['P_PV']
-            home = 0
-            if pvdata_record['P_Load'] != None:
-                home = -pvdata_record['P_Load']
+                
+            # Extract values with defaults
+            grid = pvdata_record.get('P_Grid', 0) or 0
+            pv = pvdata_record.get('P_PV', 0) or 0
+            home = -(pvdata_record.get('P_Load', 0) or 0)
 
             try:
                 with self.sqlcon:
                     self.debug(f"run: INSERT INTO samples (timestamp, grid, solar, home) VALUES ({pvdata_record['datetime']}, {grid:.2f}, {pv:.2f}, {home:.2f})")
-                    self.sqlcon.execute("INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", 
-                        (pvdata_record["datetime"], grid, pv, home))
+                    self.sqlcon.execute(
+                        "INSERT INTO samples (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)",
+                        (pvdata_record["datetime"], grid, pv, home)
+                    )
             except sqlite3.OperationalError as e:
                 self.debug(f"Error saving data to sqlite DB: {e}")
         else:
@@ -662,40 +813,54 @@ class SolarWeb:
         return True
 
     def poll_daily_data(self):
-        # process_chart_data gets the data for the month so far given a date. We
-        # give it yesterday's date so that we don't miss the last day of the
-        # month. Note that there is never data for the current day anyway.
+        """Poll and store daily solar data.
+        
+        Returns:
+            bool: True if polling successful, False otherwise
+        """
         yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-        yesterday = yesterday.replace(hour = 0, minute = 0, second = 0, microsecond = 0)
+        yesterday = yesterday.replace(hour=0, minute=0, second=0, microsecond=0)
+        
         if yesterday > self.last_dailydata_timestamp:
             if not self.process_chart_data(yesterday):
                 return False
+                
         return True
-            
 
     def run(self):
-        self.load_config()
-        self.init_dailydata()
-
-        while True:
-            if not self.throttled_login():
-                continue
+        """Main loop for polling and processing solar data."""
+        try:
+            self.load_config()
+            self.init_dailydata()
 
             while True:
-                if not self.poll_realtime_data():
-                    break
-                if not self.poll_daily_data():
-                    break
-                self.aggregate_data(self.next_sample_time)
+                if not self.throttled_login():
+                    continue
 
-                now = datetime.now(timezone.utc)
-                if self.next_sample_time > now:
-                    time.sleep((self.next_sample_time - now).total_seconds())
+                while True:
+                    if not self.poll_realtime_data():
+                        break
+                    if not self.poll_daily_data():
+                        break
+                        
+                    self.aggregate_data(self.next_sample_time)
 
-        self.sqlcon.close()
-        if self.requests_session != None:
-            self.requests_session.close()
+                    # Wait until next sample time
+                    now = datetime.now(timezone.utc)
+                    if self.next_sample_time > now:
+                        time.sleep((self.next_sample_time - now).total_seconds())
 
+        except Exception as e:
+            print(f"Error in main loop: {e}")
+            if self.debug_enabled:
+                import traceback
+                traceback.print_exc()
+        finally:
+            # Cleanup resources
+            if self.sqlcon is not None:
+                self.sqlcon.close()
+            if self.requests_session is not None:
+                self.requests_session.close()
 
 def history():
     solar_web = SolarWeb()
