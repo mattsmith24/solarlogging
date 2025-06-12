@@ -1,18 +1,17 @@
-import time
-from datetime import datetime, timedelta, timezone
-import json
 import argparse
-from collections import defaultdict
+import json
 import sqlite3
-import appdirs
 import sys
+import time
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from abc import ABC, abstractmethod
 
+import appdirs
 import requests
-from urllib.parse import urlparse
-from urllib.parse import parse_qs
 from bs4 import BeautifulSoup
+from urllib.parse import parse_qs, urlparse
 
 SOLARLOGGING_DATA_DIR = appdirs.user_data_dir("solarlogging", "mattsmith24")
 SOLARLOGGING_DB_PATH = Path(SOLARLOGGING_DATA_DIR, "solarlogging.db")
@@ -20,17 +19,20 @@ SOLARLOGGING_DB_PATH = Path(SOLARLOGGING_DATA_DIR, "solarlogging.db")
 # Make stdout line-buffered (i.e. each line will be automatically flushed):
 sys.stdout.reconfigure(line_buffering=True)
 
-def is_ts_newer_than_last_dailydata_timestamp(ts_datetime, last_dailydata_timestamp):
+def timestamp_newer_than(timestamp, other_timestamp):
+    """Check if a timestamp is newer than the other timestamp.
+       If the other timestamp is None, then assume the timestamp is new."""
     return (
-        last_dailydata_timestamp == None
-        or ts_datetime > last_dailydata_timestamp
+        other_timestamp is None
+        or timestamp > other_timestamp
     )
 
 
-def is_ts_newer_than_or_equal_to_today(ts_datetime):
+def timestamp_newer_than_or_equal_to_today(timestamp):
+    """Check if a timestamp is newer than or equal to today."""
     today = datetime.now(timezone.utc)
     today = today.replace(hour=0, minute=0, second=0, microsecond=0)
-    return ts_datetime >= today
+    return timestamp >= today
 
 
 def is_new_timestamp(ts_datetime, last_dailydata_timestamp):
@@ -38,239 +40,339 @@ def is_new_timestamp(ts_datetime, last_dailydata_timestamp):
        and not newer than yesterday. This is to avoid processing data that
        is not yet complete (e.g. the current day)."""
     return (
-        is_ts_newer_than_last_dailydata_timestamp(ts_datetime, last_dailydata_timestamp)
-        and not is_ts_newer_than_or_equal_to_today(ts_datetime)
+        timestamp_newer_than(ts_datetime, last_dailydata_timestamp)
+        and not timestamp_newer_than_or_equal_to_today(ts_datetime)
     )
 
 
 class DataAggregator(ABC):
+    """Abstract base class for aggregating solar data at different time intervals.
+    
+    This class provides the framework for aggregating solar data (grid, solar, home)
+    into different time slots (5-minute, hourly, weekly, monthly). Each subclass
+    implements specific time slot logic and unit conversion.
+    """
+    
     def __init__(self, sqlcon, debug=False):
+        """Initialize the aggregator.
+        
+        Args:
+            sqlcon: SQLite database connection
+            debug: Enable debug logging
+        """
         self.sqlcon = sqlcon
         self.debug_enabled = debug
         self.table = None
         self.source_table = None
 
-
     def debug(self, msg):
+        """Log debug message if debug mode is enabled."""
         if self.debug_enabled:
             print(msg)
 
-
     @abstractmethod
     def time_slot(self, dt):
-        """Given a timestamp, return the start of the time slot that it falls in."""
+        """Get the start time of the time slot that contains the given timestamp.
+        
+        Args:
+            dt: datetime object to find slot for
+            
+        Returns:
+            datetime: Start time of the containing slot
+        """
         pass
-
 
     @abstractmethod
     def time_slot_increment(self, dt, increment=1):
-        """Given a slot start time, return the start of the next time slot."""
+        """Get the start time of the next time slot.
+        
+        Args:
+            dt: Current slot start time
+            increment: Number of slots to increment by
+            
+        Returns:
+            datetime: Start time of the next slot
+        """
         pass
-
 
     @abstractmethod
     def convert_units(self, value, num_samples):
-        """Convert a value to the appropriate units."""
+        """Convert raw values to appropriate units for this aggregation level.
+        
+        Args:
+            value: Raw value to convert
+            num_samples: Number of samples used to calculate the value
+            
+        Returns:
+            float: Converted value
+        """
         pass
 
-
     def deadline_expired(self, deadline):
-        """Check if the deadline has expired. Allow a 5 second grace period
-           to allow for processing time."""
+        """Check if the processing deadline has expired.
+        
+        Args:
+            deadline: datetime object representing the deadline
+            
+        Returns:
+            bool: True if deadline has expired (with 5 second grace period)
+        """
         return datetime.now(timezone.utc) >= deadline - timedelta(seconds=5)
 
-
     def get_last_aggregate_timestamp(self):
-        """Get the last timestamp from the aggregation table or if there's no
-        data, then the start of the source data."""
+        """Get the last timestamp from the aggregation table.
+        
+        If no data exists, returns the start time of the first source data.
+        
+        Returns:
+            datetime: Last timestamp in aggregation table or first source data timestamp
+        """
         cur = self.sqlcon.cursor()
         last_timestamp = None
+        
+        # Get last timestamp from aggregation table
         for row in cur.execute(f"SELECT * from {self.table} order by id desc limit 1"):
             last_timestamp = datetime.fromisoformat(row["timestamp"])
-        if last_timestamp == None:
-            # get first sample timestamp
+            
+        # If no aggregation data, get first source data timestamp
+        if last_timestamp is None:
             for row in cur.execute(f"SELECT * from {self.source_table} order by id asc limit 1"):
                 last_timestamp = self.time_slot(datetime.fromisoformat(row["timestamp"]))
+                
         return last_timestamp
 
-
     def get_source_data(self, deadline, cur, slot_start_timestamp, last_source_timestamp):
-        # Attempt to query about 100 slots worth of data at a time.
+        """Get source data for aggregation.
+        
+        Args:
+            deadline: Processing deadline
+            cur: Database cursor
+            slot_start_timestamp: Start time of first slot to process
+            last_source_timestamp: Last available source data timestamp
+            
+        Returns:
+            list: Source data rows
+        """
         source_data = []
+        
         while not self.deadline_expired(deadline):
+            # Query about 2000 slots worth of data at a time
             query_end_timestamp = self.time_slot_increment(slot_start_timestamp, 2000)
-            for row in cur.execute(f"SELECT * from {self.source_table} WHERE timestamp >= ? and timestamp < ? order by id asc",
-                    (slot_start_timestamp.isoformat(), query_end_timestamp.isoformat())):
+            
+            # Get data for current time range
+            for row in cur.execute(
+                f"SELECT * from {self.source_table} WHERE timestamp >= ? and timestamp < ? order by id asc",
+                (slot_start_timestamp.isoformat(), query_end_timestamp.isoformat())
+            ):
                 source_data.append(row)
+                
             self.debug(f"aggregate_data: {self.table}: Found {len(source_data)} rows from {slot_start_timestamp} to {query_end_timestamp}")
             # We must get at least one slot worth of data or reach the end of the source data
             if datetime.fromisoformat(source_data[-1]["timestamp"]) >= self.time_slot_increment(slot_start_timestamp):
                 self.debug(f"aggregate_data: {self.table}: Found at least one slot worth of data")
                 break
+                
             if datetime.fromisoformat(source_data[-1]["timestamp"]) >= last_source_timestamp:
                 self.debug(f"aggregate_data: {self.table}: Reached end of data. Not enough data to aggregate")
                 break
-            # Look for the next slot that has data in it. There may be gaps in the data
+                
+            # Look for next slot with data
             found_more_data = False
-            for row in cur.execute(f"SELECT * from {self.source_table} where timestamp > ? \
-                and (grid != 0 or solar != 0 or home != 0) order by id asc limit 1",
-                (self.time_slot_increment(slot_start_timestamp).isoformat(),)):
+            for row in cur.execute(
+                f"SELECT * from {self.source_table} where timestamp > ? and (grid != 0 or solar != 0 or home != 0) order by id asc limit 1",
+                (self.time_slot_increment(slot_start_timestamp).isoformat(),)
+            ):
                 slot_start_timestamp = self.time_slot(datetime.fromisoformat(row["timestamp"]))
                 found_more_data = True
                 self.debug(f"aggregate_data: {self.table}: Found more data after gap at cur_timestamp={slot_start_timestamp}")
+                
             if not found_more_data:
                 self.debug(f"aggregate_data: {self.table}: No more data found after {slot_start_timestamp}")
                 break
+                
         return source_data
 
-
     def process_aggregation(self, deadline):
+        """Process data aggregation up to the deadline.
+        
+        Args:
+            deadline: Processing deadline
+        """
         cur = self.sqlcon.cursor()
+        
+        # Get last processed timestamp and last available source data
         last_aggregate_timestamp = self.get_last_aggregate_timestamp()
         last_source_timestamp = None
+        
         for row in cur.execute(f"SELECT * from {self.source_table} order by id desc limit 1"):
             last_source_timestamp = datetime.fromisoformat(row["timestamp"])
+            
         if last_source_timestamp is None:
             self.debug(f"process_aggregation: {self.table}: No source data found")
             return
-        # Assume last_timestamp lines up with a slot start. The five minute slots are recorded
-        # with the timestamp at the start of the slot.
+            
+        # Start processing from next slot after last processed
         slot_start_timestamp = self.time_slot_increment(last_aggregate_timestamp)
         aggregate_rows = []
+        
+        # Get source data for processing
         source_data = self.get_source_data(deadline, cur, slot_start_timestamp, last_source_timestamp)
-
-        # Loop through as many slots as we can before time limit
-        while source_data \
-                and slot_start_timestamp < self.time_slot(datetime.fromisoformat(source_data[-1]["timestamp"])) \
-                and not self.deadline_expired(deadline):
+        
+        # Process slots until deadline or end of data
+        while (source_data and 
+               slot_start_timestamp < self.time_slot(datetime.fromisoformat(source_data[-1]["timestamp"])) and 
+               not self.deadline_expired(deadline)):
+            
             slot_end_timestamp = self.time_slot_increment(slot_start_timestamp)
+            
+            # Initialize slot totals
             grid = 0
             solar = 0
             home = 0
             num_samples = 0
-            slot_rows = [row for row in source_data
-                        if datetime.fromisoformat(row["timestamp"]) >= slot_start_timestamp
-                        and datetime.fromisoformat(row["timestamp"]) < slot_end_timestamp]
+            
+            # Get rows for current slot
+            slot_rows = [
+                row for row in source_data
+                if datetime.fromisoformat(row["timestamp"]) >= slot_start_timestamp
+                and datetime.fromisoformat(row["timestamp"]) < slot_end_timestamp
+            ]
+            
+            # Sum values for slot
             for row in slot_rows:
-                # Only accumulate +ve grid usage. Feedin can be calculated from 'home - solar'
-                if row['grid'] > 0:
+                if row['grid'] > 0:  # Only accumulate positive grid usage
                     grid += row['grid']
                 solar += row['solar']
                 home += row['home']
                 num_samples += 1
+                
+            # Convert and store if we have data
             if grid > 0.0 or solar > 0.0 or home > 0.0:
                 grid = self.convert_units(grid, num_samples)
                 solar = self.convert_units(solar, num_samples)
                 home = self.convert_units(home, num_samples)
-                aggregate_rows.append(
-                    {
-                        "timestamp": slot_start_timestamp.isoformat(),
-                        "grid": grid,
-                        "solar": solar,
-                        "home": home
-                    }
-                )
+                
+                aggregate_rows.append({
+                    "timestamp": slot_start_timestamp.isoformat(),
+                    "grid": grid,
+                    "solar": solar,
+                    "home": home
+                })
+                
                 self.debug(f"aggregate_data: {self.table}: ({slot_start_timestamp.isoformat()}, {grid:.2f}, {solar:.2f}, {home:.2f})")
             else:
-                # Skip ahead to the next point in the source data that is
-                # greater than the slot_start_timestamp
-                slot_rows = [row for row in source_data
-                        if datetime.fromisoformat(row["timestamp"]) > slot_start_timestamp
-                        and (row["grid"] != 0 or row["solar"] != 0 or row["home"] != 0)]
-                if len(slot_rows) > 0:
+                # Skip to next data point if no data in current slot
+                slot_rows = [
+                    row for row in source_data
+                    if datetime.fromisoformat(row["timestamp"]) > slot_start_timestamp
+                    and (row["grid"] != 0 or row["solar"] != 0 or row["home"] != 0)
+                ]
+                
+                if slot_rows:
                     row = slot_rows[0]
                     slot_end_timestamp = self.time_slot(datetime.fromisoformat(row["timestamp"]))
                     self.debug(f"process_aggregation {self.table}: Skip to slot_start_timestamp={slot_end_timestamp}")
+                    
             slot_start_timestamp = slot_end_timestamp
-        if len(aggregate_rows) > 0:
+            
+        # Save aggregated data
+        if aggregate_rows:
             with self.sqlcon:
                 self.debug(f"process_aggregation: Inserting {len(aggregate_rows)} rows into {self.table}")
                 self.sqlcon.executemany(
                     f"INSERT INTO {self.table} (timestamp, grid, solar, home) VALUES (:timestamp, :grid, :solar, :home)",
                     aggregate_rows
                 )
+                
         self.debug(f"process_aggregation: {self.table}: done")
 
+
 class FiveMinuteAggregator(DataAggregator):
+    """Aggregates data into 5-minute intervals."""
+    
     def __init__(self, sqlcon, debug=False):
         super().__init__(sqlcon, debug)
         self.table = "fiveminute"
         self.source_table = "samples"
 
     def time_slot(self, dt):
-        """ Divide the hour into 5 minute slots and return the start time of the slot
-            that the current timestamp falls in. """
+        """Get start of 5-minute slot containing the timestamp."""
         res = dt.replace(minute=0, second=0, microsecond=0)
         slot_num = (dt - res) // timedelta(minutes=5)
-        res += timedelta(minutes=5) * slot_num
-        return res
+        return res + timedelta(minutes=5) * slot_num
     
     def time_slot_increment(self, dt, increment=1):
-        """ Given a slot start time, return the start of the next 5 minute slot. """
+        """Get start of next 5-minute slot."""
         return dt + (timedelta(minutes=5) * increment)
 
     def convert_units(self, value, num_samples):
-        """ Average kW """
+        """Convert to average kW."""
         return value / num_samples if num_samples > 0 else 0.0
 
+
 class HourlyAggregator(DataAggregator):
+    """Aggregates data into hourly intervals."""
+    
     def __init__(self, sqlcon, debug=False):
         super().__init__(sqlcon, debug)
         self.table = "hourly"
         self.source_table = "samples"
+
     def time_slot(self, dt):
-        """ Divide the hour into slots and return the start time of the slot
-            that the current timestamp falls in. """
-        res = dt.replace(minute=0, second=0, microsecond=0)
-        return res
+        """Get start of hour containing the timestamp."""
+        return dt.replace(minute=0, second=0, microsecond=0)
 
     def time_slot_increment(self, dt, increment=1):
-        """ Given a slot start time, return the start of the next hour slot. """
+        """Get start of next hour."""
         return dt + (timedelta(hours=1) * increment)
 
     def convert_units(self, value, num_samples):
-        """ Average kW """
+        """Convert to average kW."""
         return value / num_samples if num_samples > 0 else 0.0
 
+
 class WeeklyAggregator(DataAggregator):
+    """Aggregates data into weekly intervals starting on Monday."""
+    
     def __init__(self, sqlcon, debug=False):
         super().__init__(sqlcon, debug)
         self.table = "weekly"
         self.source_table = "daily"
 
     def time_slot(self, dt):
-        """ Return the start of the week that the current timestamp falls in.
-            The week starts on Monday. """
-        return dt.replace(hour=0, minute=0, second=0, microsecond=0) \
-            - timedelta(days=dt.weekday())
+        """Get start of week (Monday) containing the timestamp."""
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=dt.weekday())
+
     def time_slot_increment(self, dt, increment=1):
-        """ Given a slot start time, return the start of the next week. """
+        """Get start of next week."""
         return dt + (timedelta(days=7) * increment)
+
     def convert_units(self, value, _num_samples):
-        """ Keep it in kWh. Don't average it because it messes up the data """
+        """Keep values in kWh."""
         return value
 
+
 class MonthlyAggregator(DataAggregator):
+    """Aggregates data into monthly intervals."""
+    
     def __init__(self, sqlcon, debug=False):
         super().__init__(sqlcon, debug)
         self.table = "monthly"
         self.source_table = "daily"
 
-
     def time_slot(self, dt):
-        """ Return the start of the month that the current timestamp falls in. """
+        """Get start of month containing the timestamp."""
         return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-
     def time_slot_increment(self, dt, increment=1):
-        """ Given a slot start time, return the start of the next month. """
+        """Get start of next month."""
         for _ in range(increment):
             dt = dt + timedelta(days=31)
             dt = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         return dt
 
     def convert_units(self, value, _num_samples):
-        """ Keep it in kWh. Don't average it because it messes up the data """
+        """Keep values in kWh."""
         return value
 
 class SolarWeb:
@@ -466,7 +568,7 @@ class SolarWeb:
                     self.sqlcon.execute("INSERT INTO daily (timestamp, grid, solar, home) VALUES (?, ?, ?, ?)", entry)
                     last_insert_ts = ts_datetime
             else:
-                if is_ts_newer_than_last_dailydata_timestamp(ts_datetime, self.last_dailydata_timestamp):
+                if timestamp_newer_than(ts_datetime, self.last_dailydata_timestamp):
                     self.debug("This ts is too new. We can't process daily data until the day is done")
                 else:
                     self.debug("We already have this ts in the table")
