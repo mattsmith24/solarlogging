@@ -49,9 +49,15 @@ class SolarWebClient:
         if self.requests_session is not None:
             self.requests_session.close()
         self.requests_session = requests.Session()
+        
+        # Set a realistic User-Agent to avoid being blocked
+        self.requests_session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        })
 
         try:
             # Get initial session
+            self.debug("Getting initial session")
             external_login = self.requests_session.get("https://www.solarweb.com/Account/ExternalLogin")
             if external_login.status_code != 200:
                 print("Error: Failed to access ExternalLogin")
@@ -61,6 +67,7 @@ class SolarWebClient:
                 return False
 
             # Parse session data key
+            self.debug("Parsing session data key")
             parsed_url = urlparse(external_login.url)
             query_dict = parse_qs(parsed_url.query)
             if "sessionDataKey" not in query_dict:
@@ -72,6 +79,7 @@ class SolarWebClient:
             session_data_key = query_dict['sessionDataKey'][0]
 
             # Login to Fronius
+            self.debug("Posting to commonauth")
             commonauth = self.requests_session.post(
                 "https://login.fronius.com/commonauth",
                 data={
@@ -103,6 +111,7 @@ class SolarWebClient:
                 return False
 
             # Complete login process
+            self.debug("Posting to external login callback")
             external_login_callback = self.requests_session.post(
                 "https://www.solarweb.com/Account/ExternalLoginCallback",
                 data=commonauth_form_data
