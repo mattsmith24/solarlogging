@@ -336,4 +336,48 @@ class MonthlyAggregator(DataAggregator):
 
     def convert_units(self, value, _num_samples):
         """Keep values in kWh."""
-        return value 
+        return value
+
+class WeeklyAveragesAggregator(DataAggregator):
+    """Aggregates data into weekly intervals starting on Monday."""
+    
+    def __init__(self, sqlcon, debug=False):
+        super().__init__(sqlcon, debug)
+        self.table = "weekly_averages"
+        self.source_table = "daily"
+
+    def time_slot(self, dt):
+        """Get start of week (Monday) containing the timestamp."""
+        return dt.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=dt.weekday())
+
+    def time_slot_increment(self, dt, increment=1):
+        """Get start of next week."""
+        return dt + (timedelta(days=7) * increment)
+
+    def convert_units(self, value, num_samples):
+        """Average daily kWh."""
+        return value / num_samples if num_samples > 0 else 0.0
+
+
+class MonthlyAveragesAggregator(DataAggregator):
+    """Aggregates data into monthly intervals."""
+    
+    def __init__(self, sqlcon, debug=False):
+        super().__init__(sqlcon, debug)
+        self.table = "monthly_averages"
+        self.source_table = "daily"
+
+    def time_slot(self, dt):
+        """Get start of month containing the timestamp."""
+        return dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    def time_slot_increment(self, dt, increment=1):
+        """Get start of next month."""
+        for _ in range(increment):
+            dt = dt + timedelta(days=31)
+            dt = dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        return dt
+
+    def convert_units(self, value, num_samples):
+        """Average daily kWh."""
+        return value / num_samples if num_samples > 0 else 0.0

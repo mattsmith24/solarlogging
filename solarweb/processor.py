@@ -13,7 +13,9 @@ from .aggregator import (
     FiveMinuteAggregator,
     HourlyAggregator,
     WeeklyAggregator,
-    MonthlyAggregator
+    MonthlyAggregator,
+    WeeklyAveragesAggregator,
+    MonthlyAveragesAggregator,
 )
 
 SOLARLOGGING_DATA_DIR = appdirs.user_data_dir("solarlogging", "mattsmith24")
@@ -108,6 +110,24 @@ class SolarDataProcessor:
             """)
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS monthly (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS weekly_averages (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    grid real,
+                    solar real,
+                    home real,
+                    timestamp text
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS monthly_averages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     grid real,
                     solar real,
@@ -241,6 +261,8 @@ class SolarDataProcessor:
         HourlyAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
         WeeklyAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
         MonthlyAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
+        WeeklyAveragesAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
+        MonthlyAveragesAggregator(self.sqlcon, self.debug_enabled).process_aggregation(deadline)
 
     def close(self):
         """Close database connection."""
