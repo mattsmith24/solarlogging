@@ -230,8 +230,8 @@ class SolarDataProcessor:
                 entry = (
                     ts_datetime.isoformat(),
                     data_dict["grid"],
-                    data_dict["direct"] + data_dict["feedin"],
-                    data_dict["direct"] + data_dict["grid"]
+                    data_dict.get("direct",0) + data_dict.get("feedin", 0),
+                    data_dict.get("direct", 0) + data_dict["grid"]
                 )
                 
                 with self.sqlcon:

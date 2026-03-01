@@ -26,19 +26,17 @@ the data that is being inserted to the database.
 
 # Install
 
-```
-python3 -m venv .venv
-.venv/bin/pip3 install -r requirements.txt
-```
+Install uv https://docs.astral.sh/uv/
 
-Then to run it, use .venv/bin/python3 -m solarweb.main
+Then run it, use `uv run python -m solarweb.main`. uv will create a venv and
+install dependendencies on first run.
 
 # Deploy
 
 Copy files to /opt/solarlogging
 
 ```
-sudo useradd -r solarlogging
+sudo useradd -r -d /opt/solarlogging solarlogging
 sudo chown -R solarlogging /opt/solarlogging
 sudo cp solarlogging.service to /etc/systemd/system
 sudo systemctl daemon-reload
