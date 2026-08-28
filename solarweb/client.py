@@ -58,7 +58,10 @@ class SolarWebClient:
         try:
             # Get initial session
             self.debug("Getting initial session")
-            external_login = self.requests_session.get("https://www.solarweb.com/Account/ExternalLogin")
+            external_login = self.requests_session.get(
+                "https://www.solarweb.com/Account/ExternalLogin",
+                timeout=30,
+            )
             if external_login.status_code != 200:
                 print("Error: Failed to access ExternalLogin")
                 self.debug(external_login)
@@ -87,7 +90,8 @@ class SolarWebClient:
                     "username": self.config["username"],
                     "password": self.config["password"],
                     "chkRemember": "on"
-                }
+                },
+                timeout=30,
             )
             if commonauth.status_code != 200:
                 print("Error: Failed to post to commonauth")
@@ -114,7 +118,8 @@ class SolarWebClient:
             self.debug("Posting to external login callback")
             external_login_callback = self.requests_session.post(
                 "https://www.solarweb.com/Account/ExternalLoginCallback",
-                data=commonauth_form_data
+                data=commonauth_form_data,
+                timeout=30,
             )
             if external_login_callback.status_code != 200:
                 print("Error: Failed to complete login process")
@@ -137,8 +142,8 @@ class SolarWebClient:
             print("Logged into solarweb. Begin polling data")
             return True
 
-        except requests.exceptions.ConnectionError as e:
-            print(f"Connection error during login: {e}")
+        except requests.exceptions.RequestException as e:
+            print(f"Login failed: {e}")
             return False
 
     def get_chart(self, chartday, interval, view):
@@ -166,7 +171,8 @@ class SolarWebClient:
                     "day": chartday.day,
                     "interval": interval,
                     "view": view
-                }
+                },
+                timeout=30,
             )
             
             if chart_data.status_code != 200:
@@ -182,7 +188,7 @@ class SolarWebClient:
                 
             return jsonchart
             
-        except requests.exceptions.ConnectionError as e:
+        except requests.exceptions.RequestException as e:
             self.debug(f"Exception reading chart for {chartday.year}-{chartday.month}-{chartday.day} {interval} {view}")
             self.debug(f"{e}")
             return None
@@ -198,7 +204,8 @@ class SolarWebClient:
         try:
             actual_data = self.requests_session.get(
                 "https://www.solarweb.com/ActualData/GetCompareDataForPvSystem",
-                params={"pvSystemId": self.pv_system_id}
+                params={"pvSystemId": self.pv_system_id},
+                timeout=30,
             )
             
             if actual_data.status_code != 200:
@@ -225,7 +232,7 @@ class SolarWebClient:
                 is_online=is_online
             )
             
-        except (requests.exceptions.ConnectionError, requests.exceptions.JSONDecodeError) as e:
+        except (requests.exceptions.RequestException, requests.exceptions.JSONDecodeError) as e:
             self.debug(f"Exception while getting realtime data: {e}")
             return None
 

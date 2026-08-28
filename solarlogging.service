@@ -1,7 +1,7 @@
 [Unit]
 Description=Solar Logging Service
 After=network.target
- 
+
 [Service]
 Type=exec
 User=solarlogging
@@ -9,6 +9,9 @@ Group=solarlogging
 ExecStart=/opt/solarlogging/run.sh
 Restart=always
 SyslogIdentifier=solarlogging
- 
+TimeoutStopSec=30
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
 [Install]
 WantedBy=multi-user.target
